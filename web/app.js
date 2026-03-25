@@ -223,7 +223,8 @@ async function step(){
     if(!d.ok){ logEvent(`STEP refusé: ${d.reason || 'unknown'}`); return; }
     updateChart(d.candle);
     refreshFromSnapshot(d.snapshot);
-    logEvent(`phase=${d.phase || 'n/a'} state=${d.state} close=${Number(d.candle.close).toFixed(2)}`);
+    const tr = d.market_structure?.trend || 'range';
+    logEvent(`amd=${d.amd_phase || 'n/a'} phase=${d.phase || 'n/a'} trend=${tr} close=${Number(d.candle.close).toFixed(2)}`);
   } catch (err) {
     logEvent(`STEP ERROR: ${err.message || err}`);
   }

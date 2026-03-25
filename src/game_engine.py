@@ -49,9 +49,20 @@ class TradingGameEngine:
         self.phase_cycle = ["accumulation", "manipulation", "distribution"]
         self.phase_idx = 0
         self.phase = self.phase_cycle[self.phase_idx]
+        self.amd_phase_cycle = ["ACCUMULATION", "MANIPULATION", "EXPANSION"]
+        self.amd_phase_idx = 0
+        self.amd_phase = self.amd_phase_cycle[self.amd_phase_idx]
         self.liquidity_high = float("nan")
         self.liquidity_low = float("nan")
         self.fvg_targets: list[dict[str, float]] = []
+        self.market_structure = {
+            "trend": "range",
+            "lastHigh": float("nan"),
+            "lastLow": float("nan"),
+            "bos": False,
+            "choch": False,
+        }
+        self.liquidity = {"buyside": [], "sellside": []}
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -127,6 +138,9 @@ class TradingGameEngine:
             "state": self.current_state,
             "timestamp": str(self.history["datetime"].iloc[-1]),
             "phase": self.phase,
+            "amd_phase": self.amd_phase,
+            "market_structure": self.market_structure.copy(),
+            "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
             "recent_events": self.recent_events,
             "recent_order_participation": self.recent_order_participation,
             "recent_order_impact": self.recent_order_impact,
@@ -184,9 +198,107 @@ class TradingGameEngine:
         self.liquidity_high = float(tail["high"].max())
         self.liquidity_low = float(tail["low"].min())
 
+    def _find_swing_levels(self, side: str, lookback: int = 80) -> list[float]:
+        tail = self.history.tail(lookback).reset_index(drop=True)
+        if len(tail) < 5:
+            return []
+        levels = []
+        for i in range(2, len(tail) - 2):
+            if side == "high":
+                p = float(tail.loc[i, "high"])
+                if p >= float(tail.loc[i - 1, "high"]) and p >= float(tail.loc[i + 1, "high"]):
+                    levels.append(p)
+            else:
+                p = float(tail.loc[i, "low"])
+                if p <= float(tail.loc[i - 1, "low"]) and p <= float(tail.loc[i + 1, "low"]):
+                    levels.append(p)
+        uniq = sorted(set(round(x, 6) for x in levels))
+        return [float(x) for x in uniq[-20:]]
+
+    def _update_liquidity_pools(self) -> None:
+        self.liquidity["buyside"] = self._find_swing_levels("high")
+        self.liquidity["sellside"] = self._find_swing_levels("low")
+
+    def _update_market_structure(self, price: float) -> None:
+        ms = self.market_structure
+        prev_trend = str(ms["trend"])
+        prev_high = float(ms["lastHigh"]) if np.isfinite(ms["lastHigh"]) else float(self.history["high"].tail(30).max())
+        prev_low = float(ms["lastLow"]) if np.isfinite(ms["lastLow"]) else float(self.history["low"].tail(30).min())
+        ms["bos"] = False
+        ms["choch"] = False
+        if price > prev_high:
+            ms["bos"] = True
+            ms["trend"] = "bullish"
+        elif price < prev_low:
+            ms["bos"] = True
+            ms["trend"] = "bearish"
+
+        if prev_trend == "bullish" and price < prev_low:
+            ms["choch"] = True
+        if prev_trend == "bearish" and price > prev_high:
+            ms["choch"] = True
+
+        ms["lastHigh"] = float(self.history["high"].tail(40).max())
+        ms["lastLow"] = float(self.history["low"].tail(40).min())
+
+    def _detect_sweep(self, high: float, low: float, close: float) -> str | None:
+        for level in self.liquidity["buyside"]:
+            if high > level and close < level:
+                return "buyside"
+        for level in self.liquidity["sellside"]:
+            if low < level and close > level:
+                return "sellside"
+        return None
+
+    def _detect_fvg_levels(self, lookback: int = 90) -> list[dict[str, float]]:
+        tail = self.history.tail(lookback).reset_index(drop=True)
+        out: list[dict[str, float]] = []
+        for i in range(2, len(tail)):
+            a = tail.iloc[i - 2]
+            c = tail.iloc[i]
+            if float(a["high"]) < float(c["low"]):
+                out.append({"low": float(a["high"]), "high": float(c["low"])})
+            elif float(a["low"]) > float(c["high"]):
+                out.append({"low": float(c["high"]), "high": float(a["low"])})
+        return out[-20:]
+
+    def _detect_order_blocks(self, lookback: int = 90) -> list[dict[str, float]]:
+        tail = self.history.tail(lookback).reset_index(drop=True)
+        obs: list[dict[str, float]] = []
+        ret = tail["close"].pct_change().fillna(0.0)
+        thr = float(max(1e-4, ret.abs().rolling(30, min_periods=5).mean().iloc[-1] * 2.5))
+        for i in range(1, len(tail)):
+            move = abs(float(ret.iloc[i]))
+            if move > thr:
+                prev = tail.iloc[i - 1]
+                obs.append({"open": float(prev["open"]), "high": float(prev["high"]), "low": float(prev["low"]), "close": float(prev["close"])})
+        return obs[-15:]
+
+    def _liquidity_targeting(self, price: float) -> float:
+        levels = [*self.liquidity["buyside"], *self.liquidity["sellside"]]
+        if not levels:
+            return 0.0
+        target = min(levels, key=lambda lvl: abs(lvl - price))
+        return (float(target) - price) * 0.05
+
+    def _fvg_attraction(self, price: float, fvg_levels: list[dict[str, float]]) -> float:
+        if not fvg_levels:
+            return 0.0
+        nearest = min(fvg_levels, key=lambda z: abs(((z["low"] + z["high"]) / 2.0) - price))
+        mid = (nearest["low"] + nearest["high"]) / 2.0
+        return (mid - price) * 0.03
+
+    def _mean_reversion(self, price: float) -> float:
+        anchor = float(self.history["close"].tail(80).mean() or price)
+        return (anchor - price) * 0.02
+
     def _advance_phase(self) -> None:
         self.phase_idx = (self.phase_idx + 1) % len(self.phase_cycle)
         self.phase = self.phase_cycle[self.phase_idx]
+
+    def _advance_amd_phase(self) -> None:
+        self.amd_phase_idx = (self.amd_phase_idx + 1) % len(self.amd_phase_cycle)
+        self.amd_phase = self.amd_phase_cycle[self.amd_phase_idx]
 
     # -------- impact model --------
     def _local_executable_volume_notional(self, session: str, local_notional: float, liquidity_strength: float) -> float:
@@ -361,13 +473,6 @@ class TradingGameEngine:
             noise *= 1.2
             base_move *= 1.3
 
-        fomo_effect = 0.0
-        panic_effect = 0.0
-        if abs(base_move) > sigma * 1.2:
-            fomo_effect = base_move * float(self.rng.uniform(0.2, 0.5))
-        if base_move < -sigma * 1.4:
-            panic_effect = base_move * float(self.rng.uniform(0.5, 1.8))
-
         player_effect = float(self.pending_player_impact)
         liquidity_effect = 0.0
         if self.phase == "manipulation":
@@ -379,12 +484,32 @@ class TradingGameEngine:
                 else:
                     liquidity_effect = np.log(max(0.01, self.liquidity_high * (1 + hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
 
-        move = drift + noise + base_move + fomo_effect + panic_effect + liquidity_effect + player_effect
+        current_price = float(self.history["close"].iloc[-1])
+        self._update_liquidity_pools()
+        fvg_levels = self._detect_fvg_levels()
+        order_blocks = self._detect_order_blocks()
+
+        trend_component = current_price * (drift + base_move + noise)
+        mean_reversion = self._mean_reversion(current_price)
+        fvg_attraction = self._fvg_attraction(current_price, fvg_levels)
+        liquidity_targeting = self._liquidity_targeting(current_price)
+
+        projected_price = max(0.01, current_price + trend_component + mean_reversion + fvg_attraction + liquidity_targeting + liquidity_effect + player_effect)
+        self._update_market_structure(projected_price)
+
+        fomo_effect = 0.0
+        panic_effect = 0.0
+        if self.market_structure["bos"] and self.amd_phase == "EXPANSION":
+            fomo_effect = abs(projected_price - current_price) * float(self.rng.uniform(0.2, 0.6))
+        pre_sweep = self._detect_sweep(max(current_price, projected_price), min(current_price, projected_price), projected_price)
+        if pre_sweep and self.market_structure["choch"]:
+            panic_effect = -abs(projected_price - current_price) * float(self.rng.uniform(0.4, 0.8))
+
+        next_close = max(0.01, projected_price + fomo_effect + panic_effect)
+        move = np.log(next_close / max(0.01, current_price))
         direction = int(np.sign(move) or direction)
         self.pending_player_impact *= self.config.pending_impact_decay
 
-        current_price = float(self.history["close"].iloc[-1])
-        next_close = max(0.01, current_price * np.exp(move))
         candle_range = max(1e-8, self.rng.normal(range_stats["mu"], range_stats["sigma"]))
         high = max(current_price, next_close) + candle_range * max(0.0, self.rng.normal(wstats["upper_mu"], wstats["upper_sigma"]))
         low = min(current_price, next_close) - candle_range * max(0.0, self.rng.normal(wstats["lower_mu"], wstats["lower_sigma"]))
@@ -403,6 +528,7 @@ class TradingGameEngine:
         if near_fvg and next_state == "REBALANCING_TO_FVG":
             next_close = max(0.01, current_price + (next_close - current_price) * self.config.fvg_rebalance_damping)
         sweep = self.lmap.detect_sweep(len(self.history), high, low, next_close)
+        structural_sweep = self._detect_sweep(high, low, next_close)
 
         # sweep/cascade conditionnelle corrélée participation/liquidité/état/vol
         proximity_score = max(0.0, 1.0 - min(liq_dist["distance_to_nearest_buy_liquidity"], liq_dist["distance_to_nearest_sell_liquidity"]))
@@ -447,6 +573,13 @@ class TradingGameEngine:
         self.fvg.update_fill(len(self.history), row["high"], row["low"])
 
         self.current_state = next_state
+        if self.amd_phase == "ACCUMULATION" and abs(move) > sigma * 0.9:
+            self._advance_amd_phase()
+        elif self.amd_phase == "MANIPULATION" and (structural_sweep is not None or sweep["recent_sweep_flag"]):
+            self._advance_amd_phase()
+        elif self.amd_phase == "EXPANSION" and abs(move) < sigma * 0.75:
+            self._advance_amd_phase()
+
         if self.phase == "accumulation" and abs(move) > sigma * 1.15:
             self._advance_phase()
         elif self.phase == "manipulation":
@@ -455,7 +588,20 @@ class TradingGameEngine:
             self._advance_phase()
         self._refresh_liquidity_zones()
         self._enforce_liquidation_if_needed()
-        return {"ok": True, "candle": row, "state": next_state, "phase": self.phase, "sweep": sweep, "snapshot": self.snapshot()}
+        return {
+            "ok": True,
+            "candle": row,
+            "state": next_state,
+            "phase": self.phase,
+            "amd_phase": self.amd_phase,
+            "sweep": sweep,
+            "structural_sweep": structural_sweep,
+            "market_structure": self.market_structure.copy(),
+            "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
+            "fvg_levels": fvg_levels[-10:],
+            "order_blocks": order_blocks[-10:],
+            "snapshot": self.snapshot(),
+        }
 
     def reset(self) -> Dict[str, object]:
         learned_bundle = self.bundle
