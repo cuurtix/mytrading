@@ -65,6 +65,7 @@ class TradingGameEngine:
         self.liquidity = {"buyside": [], "sellside": []}
         self.last_sweep = False
         self.order_blocks: list[dict[str, float]] = []
+        self.current_intention = "MOVE_TO_LIQUIDITY"
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -142,6 +143,7 @@ class TradingGameEngine:
             "phase": self.phase,
             "amd_phase": self.amd_phase,
             "market_structure": self.market_structure.copy(),
+            "intention": self.current_intention,
             "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
             "recent_events": self.recent_events,
             "recent_order_participation": self.recent_order_participation,
@@ -285,6 +287,32 @@ class TradingGameEngine:
     def liquidity_force(self, price: float) -> float:
         target = self.get_liquidity_target(price)
         return (target - price) * 0.1
+
+    def decide_intention(self, price: float, threshold: float) -> str:
+        target = self.get_liquidity_target(price)
+        if abs(target - price) < threshold:
+            return "SWEEP"
+        if not self.last_sweep:
+            return "MOVE_TO_LIQUIDITY"
+        return "EXPANSION"
+
+    def _random_spike(self, sigma: float) -> float:
+        direction = -1.0 if self.market_structure.get("trend") == "bullish" else 1.0
+        return float(direction * max(0.1, sigma * 12.0) * self.rng.uniform(0.8, 1.5))
+
+    def _strong_move(self, sigma: float) -> float:
+        return float(max(0.15, sigma * 16.0) * self.rng.uniform(0.9, 1.6))
+
+    def generate_price(self, price: float, sigma: float) -> float:
+        target = self.get_liquidity_target(price)
+        intention = self.decide_intention(price, threshold=max(0.2, sigma * price * 2.0))
+        self.current_intention = intention
+        if intention == "MOVE_TO_LIQUIDITY":
+            return float(price + (target - price) * 0.1)
+        if intention == "SWEEP":
+            return float(price + self._random_spike(sigma))
+        direction = -1.0 if self.last_sweep else 1.0
+        return float(price + direction * self._strong_move(sigma))
 
     def _fvg_attraction(self, price: float, fvg_levels: list[dict[str, float]]) -> float:
         if not fvg_levels:
@@ -512,8 +540,8 @@ class TradingGameEngine:
         wstats = self.bundle.learned.conditional_wicks.get(key, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08})
 
         sigma = float(max(1e-6, self.bundle.learned.volatility_stats["log_return_sigma"]))
-        noise = float(self.rng.normal(0.0, sigma * 0.08))
-        stochastic_return = float(self.rng.normal(0.0, sigma * 0.1))
+        noise = float(self.rng.normal(0.0, sigma * 0.05))
+        stochastic_return = float(self.rng.normal(0.0, sigma * 0.05))
 
         if self.phase == "accumulation":
             noise *= 0.5
@@ -543,12 +571,16 @@ class TradingGameEngine:
         order_blocks = self._detect_order_blocks()
         self.order_blocks = order_blocks
 
+        intention_price = self.generate_price(current_price, sigma)
         liquidity_targeting = self.liquidity_force(current_price)
         fvg_direct_pull = self.fvg_pull(current_price)
         ob_pull = self.order_block_pull(current_price, self.order_blocks)
         struct_force = self.structure_force(current_price, sigma)
-        residual = current_price * (stochastic_return + noise) * 0.15  # faible résiduel non-dominant
-        projected_price = max(0.01, current_price + liquidity_targeting + fvg_direct_pull + ob_pull + struct_force + liquidity_effect + player_effect + residual)
+        residual = current_price * (stochastic_return + noise) * 0.05  # bruit faible, non dominant
+        projected_price = max(
+            0.01,
+            intention_price + liquidity_targeting + fvg_direct_pull + ob_pull + struct_force + liquidity_effect + player_effect + residual,
+        )
         self._update_market_structure(projected_price)
 
         fomo_effect = self.compute_fomo()
@@ -653,6 +685,7 @@ class TradingGameEngine:
             "sweep": sweep,
             "structural_sweep": structural_sweep,
             "market_structure": self.market_structure.copy(),
+            "intention": self.current_intention,
             "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
             "fvg_levels": fvg_levels[-10:],
             "order_blocks": order_blocks[-10:],
