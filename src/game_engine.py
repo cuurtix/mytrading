@@ -65,7 +65,7 @@ class TradingGameEngine:
         self.liquidity = {"buyside": [], "sellside": []}
         self.last_sweep = False
         self.order_blocks: list[dict[str, float]] = []
-        self.current_intention = "MOVE_TO_LIQUIDITY"
+        self.current_intention = "MOVE_TO_TARGET"
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -284,16 +284,20 @@ class TradingGameEngine:
             return price
         return float(min(levels, key=lambda lvl: abs(lvl - price)))
 
+    def compute_target(self, price: float) -> float:
+        return self.get_liquidity_target(price)
+
     def liquidity_force(self, price: float) -> float:
-        target = self.get_liquidity_target(price)
+        target = self.compute_target(price)
         return (target - price) * 0.1
 
     def decide_intention(self, price: float, threshold: float) -> str:
-        target = self.get_liquidity_target(price)
-        if abs(target - price) < threshold:
-            return "SWEEP"
+        target = self.compute_target(price)
+        distance = abs(target - price)
+        if distance > threshold:
+            return "MOVE_TO_TARGET"
         if not self.last_sweep:
-            return "MOVE_TO_LIQUIDITY"
+            return "SWEEP"
         return "EXPANSION"
 
     def _random_spike(self, sigma: float) -> float:
@@ -304,10 +308,16 @@ class TradingGameEngine:
         return float(max(0.15, sigma * 16.0) * self.rng.uniform(0.9, 1.6))
 
     def generate_price(self, price: float, sigma: float) -> float:
-        target = self.get_liquidity_target(price)
+        target = self.compute_target(price)
         intention = self.decide_intention(price, threshold=max(0.2, sigma * price * 2.0))
+        if self.amd_phase == "ACCUMULATION":
+            intention = "MOVE_TO_TARGET"
+        elif self.amd_phase == "MANIPULATION":
+            intention = "SWEEP"
+        elif self.amd_phase == "EXPANSION":
+            intention = "EXPANSION"
         self.current_intention = intention
-        if intention == "MOVE_TO_LIQUIDITY":
+        if intention == "MOVE_TO_TARGET":
             return float(price + (target - price) * 0.1)
         if intention == "SWEEP":
             return float(price + self._random_spike(sigma))
@@ -617,6 +627,7 @@ class TradingGameEngine:
         structural_sweep = self._detect_sweep(high, low, next_close)
         if sweep["recent_sweep_flag"] or structural_sweep is not None:
             self.last_sweep = True
+            self.market_structure["choch"] = True
             # sweep drives possible reversal (trap then reverse)
             if self.market_structure["trend"] == "bullish":
                 self.market_structure["trend"] = "bearish"
