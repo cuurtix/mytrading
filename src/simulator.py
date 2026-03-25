@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 import pandas as pd
@@ -54,16 +55,33 @@ class SyntheticMarketSimulator:
         current_state = str(self.learned.feature_df["state"].iloc[-1]) if "state" in self.learned.feature_df.columns else "RANGE"
 
         # Build persistent maps from recent learned history (structure-based)
-        base_feat = self.learned.feature_df.tail(300).copy() if set(["swing_high","swing_low"]).issubset(self.learned.feature_df.columns) else add_market_features(hist.tail(300).copy())
+        logger = logging.getLogger(__name__)
+        base_feat = self.learned.feature_df.tail(300).copy() if set(["swing_high", "swing_low"]).issubset(self.learned.feature_df.columns) else add_market_features(hist.tail(300).copy())
+        base_feat = base_feat.reset_index(drop=True)
+        logger.info("[SIM] bootstrap base_feat_len_before=%s", len(base_feat))
+        if len(base_feat) < 5:
+            raise ValueError("dataset insuffisant pour initialiser la simulation (moins de 5 lignes)")
+
         lmap = LiquidityMap()
         fvg = FVGBook()
         roll_h = base_feat["high"].rolling(30, min_periods=5).max()
         roll_l = base_feat["low"].rolling(30, min_periods=5).min()
-        for i, r in base_feat.iterrows():
-            lmap.ingest_feature_row(i, r, roll_h.iloc[i], roll_l.iloc[i])
+        logger.info("[SIM] bootstrap roll_h_len=%s roll_l_len=%s", len(roll_h), len(roll_l))
+        boot = base_feat.copy()
+        boot["rolling_high"] = roll_h.reset_index(drop=True)
+        boot["rolling_low"] = roll_l.reset_index(drop=True)
+        before_dropna = len(boot)
+        boot = boot.dropna(subset=["rolling_high", "rolling_low"]).reset_index(drop=True)
+        dropped = before_dropna - len(boot)
+        logger.info("[SIM] bootstrap aligned_len=%s dropped_for_rolling_nan=%s", len(boot), dropped)
+        if boot.empty:
+            raise ValueError("dataset insuffisant pour simulation: rolling windows vides après alignement")
+
+        for i, r in boot.iterrows():
+            lmap.ingest_feature_row(i, r, float(r["rolling_high"]), float(r["rolling_low"]))
             lmap.detect_sweep(i, float(r["high"]), float(r["low"]), float(r["close"]))
             lmap.age_and_decay(i)
-            fvg.detect_new(base_feat, i, state=r.get("trend_context", ""), session=r.get("session_name", ""))
+            fvg.detect_new(boot, i, state=r.get("trend_context", ""), session=r.get("session_name", ""))
             fvg.update_fill(i, float(r["high"]), float(r["low"]))
 
         out = []
@@ -88,7 +106,7 @@ class SyntheticMarketSimulator:
 
             local_scale = float(feat_recent["range"].tail(30).mean() or 1.0)
             liq_dist = lmap.nearest_distances(next_close, local_scale=local_scale)
-            sweep = lmap.detect_sweep(step + len(base_feat), high, low, next_close)
+            sweep = lmap.detect_sweep(step + len(boot), high, low, next_close)
             dist_fvg = fvg.nearest_open_distance(next_close)
 
             new_dt = pd.to_datetime(hist["datetime"].iloc[-1], utc=True) + pd.Timedelta(seconds=self.timeframe_seconds)
@@ -117,11 +135,11 @@ class SyntheticMarketSimulator:
 
             hist = pd.concat([hist, pd.DataFrame([{k: new_row[k] for k in ["datetime", "open", "high", "low", "close", "volume"]}])], ignore_index=True)
             feat_new = add_market_features(hist.tail(60).copy()).iloc[-1]
-            lmap.ingest_feature_row(step + len(base_feat), feat_new, rolling_high=float(hist["high"].tail(30).max()), rolling_low=float(hist["low"].tail(30).min()))
-            lmap.age_and_decay(step + len(base_feat))
+            lmap.ingest_feature_row(step + len(boot), feat_new, rolling_high=float(hist["high"].tail(30).max()), rolling_low=float(hist["low"].tail(30).min()))
+            lmap.age_and_decay(step + len(boot))
             tmp = pd.DataFrame([{"high": high, "low": low}])
             fvg.detect_new(pd.concat([hist[["high", "low"]].tail(2), tmp], ignore_index=True), 2, state=next_state, session=session)
-            fvg.update_fill(step + len(base_feat), high, low)
+            fvg.update_fill(step + len(boot), high, low)
 
             current_state = next_state
 
