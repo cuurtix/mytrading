@@ -4,3 +4,4 @@ streamlit==1.41.1
 openpyxl==3.1.5
 xlrd==2.0.1
 pytest==8.3.4
+flask==3.0.3

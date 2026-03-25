@@ -1,111 +1,65 @@
-# Moteur local de simulation synthétique XAUUSD (data-driven, structurel)
+# XAUUSD Local Trading Game (HTML/CSS/JS + moteur Python data-driven)
 
-Ce projet est un moteur **XAUUSD uniquement** qui apprend les comportements depuis vos données (csv/xlsx/xls/zip), puis génère un marché synthétique cohérent **sans replay bougie par bougie**.
+Le projet est maintenant un **jeu local jouable** avec interface principale en **HTML/CSS/JavaScript**.
 
-## 1) Ingestion des données
+## Architecture choisie (Option B hybride locale)
 
-Le pipeline (`src/data_ingestion.py`) supporte :
-- scan récursif de dossier,
-- lecture `csv`, `xlsx`, `xls`,
-- lecture `zip` contenant des fichiers dans des sous-dossiers,
-- lecture de feuilles Excel,
-- détection robuste d’en-tête,
-- mapping alias robuste (`timestamp/time/...`, `open/o`, `high/h`, `low/l`, `close/c`, volumes),
-- parsing timestamp (epoch sec/ms ou texte),
-- validation/sanitation OHLC,
-- détection automatique du timeframe,
-- logs explicites,
-- fusion multi-sources avec exclusion des timeframes incompatibles.
+- **Frontend local**: `web/index.html`, `web/style.css`, `web/app.js`
+- **Backend local Python**: `game_server.py`
+- **Moteur**: ingestion + apprentissage structurel + transitions contextuelles + simulation incrémentale
 
-## 2) Détection structurelle
+Pourquoi cette architecture:
+- garde la puissance du moteur Python existant,
+- offre une UI jeu fluide en HTML,
+- reste simple à lancer en local.
 
-Le moteur extrait des features structurelles (`src/feature_engineering.py`, `src/market_structure.py`) :
-- swings mineurs/majeurs,
-- séquences HH/HL/LH/LL,
-- BOS / CHoCH,
-- impulsion / retracement,
-- compression / expansion,
-- breakout accepté/rejeté,
-- position dans le range.
+## Gameplay disponible
 
-## 3) Carte de liquidité persistante
+- BUY / SELL
+- CLOSE ALL
+- CLOSE 10% / 20% / 50%
+- DEPOSIT / WITHDRAW
+- RESTART / RESET TOTAL
+- boucle marché vivante (STEP/RUN/PAUSE + vitesse)
+- portefeuille temps réel (balance/equity/pnl/marge/exposition/positions)
 
-`src/liquidity_map.py` maintient des zones persistantes avec :
-- type, côté, force, âge, touches,
-- statut actif/swept,
-- distance aux liquidités buy/sell,
-- détection sweep (overshoot + réintégration).
+## Moteur conservé
 
-## 4) FVG avec cycle de vie
+Le cœur data-driven est conservé:
+- ingestion recursive csv/xlsx/xls/zip,
+- nettoyage/timeframe,
+- features structurelles,
+- carte de liquidité incrémentale,
+- cycle de vie FVG,
+- états contextuels,
+- transitions conditionnelles,
+- séparation direction/amplitude,
+- sessions UTC.
 
-`src/fvg_engine.py` gère des objets FVG persistants :
-- création bull/bear,
-- mitigation partielle,
-- fill complet,
-- fill_ratio,
-- âge, activité et statistiques de fill.
+## Impact du joueur sur le marché
 
-## 5) États et transitions contextuelles
+Les ordres du joueur influencent:
+- impact prix,
+- spread,
+- slippage,
+- probabilité d’impulsion,
+- interactions sweep/stop-hunt (cascade).
 
-`src/state_engine.py` apprend des transitions **contextuelles** :
-
-`P(S_{t+1} | S_t, vol_bucket, liquidity_rel_bucket, breakout_ctx, sweep_ctx, session)`
-
-avec contexte (vol bucket, proximité liquidité, breakout/sweep, session, etc.).
-
-## 6) Apprentissage comportemental
-
-`src/behavior_learning.py` apprend des distributions conditionnelles de :
-- returns,
-- ranges,
-- mèches,
-- continuation/réversal après sweep,
-- statistiques FVG,
-- profils par session.
-
-## 7) Simulation synthétique
-
-`src/simulator.py` génère chaque bougie par :
-1. contexte courant,
-2. transition d’état conditionnelle,
-3. séparation direction / amplitude,
-4. génération range/wicks conditionnelle,
-5. mise à jour liquidité/FVG,
-6. respect strict du timeframe source.
-
-## 8) Interface Streamlit
-
-`app.py` permet :
-- chargement de fichiers / zip / dossier,
-- inspection datasets détectés,
-- affichage logs explicites,
-- apprentissage,
-- visualisation des états et stats conditionnelles,
-- simulation calibrée.
-
-## 9) Sessions XAUUSD
-
-La logique de session est explicitement référencée en timezone **UTC** (ASIA, LONDON_OPEN, NEW_YORK, LATE_SESSION).
-
-## 10) Limites assumées
-
-- Modèle explicite et statistique (pas de microstructure tick-level réelle).
-- Les transitions sont conditionnelles par buckets (interprétables), pas modèle profond.
-- Qualité dépend de la qualité/couverture des données source XAUUSD.
-
-- Heuristiques restantes explicitement assumées: coefficients de saturation FOMO et bornes de bucket, documentés comme compromis interprétables.
-
-## Lancer
+## Lancer le jeu local
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py
+python game_server.py
 ```
 
-## Tests
+Puis ouvrir: `http://127.0.0.1:8000`
 
-```bash
-pytest -q
-```
+## Outil secondaire
+
+`app.py` (Streamlit) peut rester comme outil secondaire de debug/calibration, mais l’interface principale de jeu est HTML.
+
+## Heuristiques assumées
+
+Certaines bornes de gameplay sont conservées (ex: saturation d’impact/FOMO, seuils de bucket relatifs), explicitement documentées comme compromis jouabilité/réalisme.
