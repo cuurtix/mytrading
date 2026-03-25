@@ -10,7 +10,7 @@ from src.data_learning import CalibrationBundle
 from src.feature_engineering import add_market_features
 from src.fvg_engine import FVGBook
 from src.liquidity_map import LiquidityMap
-from src.logic_monitor import validate_ohlc, validate_snapshot
+from src.logic_monitor import VALID_SESSIONS, validate_ohlc, validate_snapshot
 from src.sessions import xauusd_session_name
 from src.state_engine import sample_next_state
 
@@ -40,8 +40,14 @@ class TradingGameEngine:
         self.history = bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().tail(500).reset_index(drop=True)
         self.account = GameAccount()
         self.next_pos_id = 1
-        self.pending_player_impact = 0.0
+
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
+        self.pending_player_impact = 0.0  # pression prix résiduelle
+        self.recent_order_participation = 0.0
+        self.recent_order_impact = 0.0
+        self.recent_order_notional = 0.0
+        self.recent_order_side = "none"
+        self.last_order_rejected_had_impact = False
         self.recent_events: List[str] = []
 
         self.lmap = LiquidityMap()
@@ -57,7 +63,7 @@ class TradingGameEngine:
             self.fvg.update_fill(i, float(r["high"]), float(r["low"]))
 
     def _push_event(self, msg: str) -> None:
-        self.recent_events = ([msg] + self.recent_events)[:30]
+        self.recent_events = ([msg] + self.recent_events)[:40]
 
     def _mark_to_market(self, price: float) -> Dict[str, float]:
         upnl, exposure, margin = 0.0, 0.0, 0.0
@@ -99,65 +105,80 @@ class TradingGameEngine:
             "state": self.current_state,
             "timestamp": str(self.history["datetime"].iloc[-1]),
             "recent_events": self.recent_events,
+            "recent_order_participation": self.recent_order_participation,
+            "recent_order_impact": self.recent_order_impact,
         }
         errs = validate_snapshot(snap)
         if errs:
             self._push_event("MONITOR: " + ",".join(errs))
         return snap
 
-    def _reference_market_volume_notional(self, session: str, local_notional: float, liquidity_strength: float) -> float:
-        session_notional = 361e9 / 24.0
-        session_mult = {
-            "ASIA": 0.8,
-            "LONDON_OPEN": 1.2,
-            "NEW_YORK": 1.3,
-            "LATE_SESSION": 0.7,
-        }.get(session, 1.0)
-        session_ref = session_notional * session_mult
-        local_ref = max(local_notional, 1e6)
-        liquidity_ref = max(1e6, liquidity_strength * 5e7)
-        return 0.2 * session_ref + 0.5 * local_ref + 0.3 * liquidity_ref
+    # -------- impact model --------
+    def _local_executable_volume_notional(self, session: str, local_notional: float, liquidity_strength: float) -> float:
+        session_mult = {"ASIA": 0.8, "LONDON_OPEN": 1.15, "NEW_YORK": 1.25, "LATE_SESSION": 0.7}.get(session, 1.0)
+        liq_capacity = max(5e5, liquidity_strength * 8e6)
+        return max(2e5, session_mult * (0.7 * local_notional + 0.3 * liq_capacity))
 
-    def _compute_order_impact(self, side: str, order_notional: float, ref_notional: float, local_vol: float) -> Dict[str, float]:
-        participation = order_notional / max(ref_notional, 1e-8)
+    def _global_market_reference_notional(self) -> float:
+        return 361e9  # garde-fou macro, pas le driver principal gameplay
+
+    def _compute_order_impact(self, side: str, order_notional: float, local_executable_notional: float, sigma_local: float) -> Dict[str, float]:
+        effective_participation = order_notional / max(local_executable_notional, 1e-8)
+        macro_guardrail = order_notional / max(self._global_market_reference_notional(), 1e-8)
+
         activation_threshold = 5e-6
-        if participation < activation_threshold:
+        if effective_participation < activation_threshold:
             impact = 0.0
         else:
             sign = 1.0 if side == "buy" else -1.0
             Y = 0.55
-            raw = sign * Y * max(local_vol, 1e-6) * np.sqrt(participation)
+            raw = sign * Y * max(sigma_local, 1e-6) * np.sqrt(effective_participation)
+            raw *= (1.0 - min(0.6, np.sqrt(macro_guardrail)))
             impact = float(np.clip(raw, -0.02, 0.02))
-        spread_widen = min(0.8, max(0.0, np.sqrt(participation) * 0.6))
-        slippage = abs(impact) * (1.0 + local_vol)
-        return {"impact": impact, "spread_widen": spread_widen, "slippage": slippage, "participation": participation}
 
+        # Corrélations participation -> spread/slippage
+        spread_widen = float(min(1.0, np.sqrt(effective_participation) * (1 + sigma_local * 10) * 0.45))
+        slippage = float(abs(impact) * (1.0 + spread_widen + sigma_local * 8))
+        return {
+            "impact": impact,
+            "spread_widen": spread_widen,
+            "slippage": slippage,
+            "effective_participation": float(effective_participation),
+            "macro_guardrail": float(macro_guardrail),
+        }
+
+    # -------- actions --------
     def place_order(self, side: str, size: float, leverage: int = 50) -> Dict[str, object]:
         last = self.history.iloc[-1]
         mid = float(last["close"])
         notional = abs(mid * size)
         fee = notional * 0.0002
 
-        # validation marge avant application impact
         margin_required = notional / max(leverage, 1)
         free_margin = self._mark_to_market(mid)["free_margin"]
         if free_margin < (margin_required + fee):
+            self.last_order_rejected_had_impact = False
+            self._push_event(f"ORDER {side.upper()} refusé: marge insuffisante")
             return {"ok": False, "reason": "Marge insuffisante", "required_margin": margin_required, "free_margin": free_margin, "snapshot": self.snapshot()}
 
-        local_volume_notional = float((self.history["close"].tail(30) * self.history["volume"].tail(30)).mean())
-        local_scale = float(self.history["close"].pct_change().std() or 1.0)
-        liq = self.lmap.nearest_distances(mid, local_scale=local_scale)
+        local_notional = float((self.history["close"].tail(30) * self.history["volume"].tail(30)).mean())
+        sigma_local = float(self.history["close"].pct_change().tail(60).std() or 1e-4)
+        liq = self.lmap.nearest_distances(mid, local_scale=max(sigma_local, 1e-6))
         session = xauusd_session_name(pd.to_datetime(last["datetime"], utc=True))
-        ref_notional = self._reference_market_volume_notional(session, local_volume_notional, liq["nearest_liquidity_strength"])
-        exec_impact = self._compute_order_impact(side, notional, ref_notional, local_scale)
 
-        # impact appliqué uniquement si ordre accepté
-        self.pending_player_impact += exec_impact["impact"]
+        local_exec_notional = self._local_executable_volume_notional(session, local_notional, liq["nearest_liquidity_strength"])
+        impact_info = self._compute_order_impact(side, notional, local_exec_notional, sigma_local)
 
-        spread = 0.15 * (1 + exec_impact["spread_widen"])
-        fill = mid + spread / 2 + exec_impact["slippage"] if side == "buy" else mid - spread / 2 - exec_impact["slippage"]
+        # impact appliqué seulement si accepté
+        self.pending_player_impact += impact_info["impact"]
+        self.recent_order_participation = impact_info["effective_participation"]
+        self.recent_order_impact = impact_info["impact"]
+        self.recent_order_notional = notional
+        self.recent_order_side = side
 
-        # frais débités immédiatement
+        spread = 0.15 * (1 + impact_info["spread_widen"])
+        fill = mid + spread / 2 + impact_info["slippage"] if side == "buy" else mid - spread / 2 - impact_info["slippage"]
+
         self.account.balance -= fee
         self.account.realized_pnl -= fee
 
@@ -165,7 +186,7 @@ class TradingGameEngine:
         self.next_pos_id += 1
         self.account.positions.append(pos)
         self._push_event(f"ORDER {side.upper()} accepted size={size} fill={fill:.2f} fee={fee:.2f}")
-        return {"ok": True, "execution": {"fill": float(fill), "fee": float(fee), **exec_impact}, "snapshot": self.snapshot()}
+        return {"ok": True, "execution": {"fill": float(fill), "fee": float(fee), **impact_info}, "snapshot": self.snapshot()}
 
     def close_fraction(self, fraction: float, reason: str = "user") -> Dict[str, object]:
         fraction = max(0.0, min(1.0, fraction))
@@ -203,6 +224,7 @@ class TradingGameEngine:
         self._push_event(f"WITHDRAW {amount:.2f}")
         return {"ok": True, "snapshot": self.snapshot()}
 
+    # -------- market loop --------
     def step_market(self) -> Dict[str, object]:
         feat = add_market_features(self.history.tail(300).copy())
         ref = feat.iloc[-1]
@@ -210,6 +232,9 @@ class TradingGameEngine:
 
         vol_bucket = str(ref.get("vol_regime_bucket", "NORMAL"))
         session = str(ref.get("session_name", "LONDON_OPEN"))
+        if session not in VALID_SESSIONS:
+            session = "ASIA"
+
         key = (next_state, vol_bucket, session)
         rstats = self.bundle.learned.conditional_returns.get(key, {"mu": 0.0, "sigma": self.bundle.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
         range_stats = self.bundle.learned.conditional_ranges.get(key, {"mu": self.bundle.learned.volatility_stats["range_mean"], "sigma": self.bundle.learned.volatility_stats["range_mean"] * 0.3})
@@ -234,15 +259,20 @@ class TradingGameEngine:
         low = min(current_price, next_close) - candle_range * max(0.0, self.rng.normal(wstats["lower_mu"], wstats["lower_sigma"]))
 
         local_scale = float(feat["range"].tail(30).mean() or 1.0)
+        liq_dist = self.lmap.nearest_distances(next_close, local_scale=max(local_scale, 1e-6))
         sweep = self.lmap.detect_sweep(len(self.history), high, low, next_close)
-        participation_effective = min(1.0, abs(self.pending_player_impact) * 100)
+
+        # sweep/cascade conditionnelle corrélée participation/liquidité/état/vol
+        proximity_score = max(0.0, 1.0 - min(liq_dist["distance_to_nearest_buy_liquidity"], liq_dist["distance_to_nearest_sell_liquidity"]))
         breakout_score = 1.0 if next_state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN"} else 0.0
         vol_score = 1.0 if next_state == "HIGH_VOLATILITY_PANIC" else 0.4
-        cascade_score = 0.6 * sweep["recent_sweep_strength"] + 0.5 * breakout_score + 0.4 * participation_effective + 0.3 * vol_score
-        if sweep["recent_sweep_flag"] and cascade_score > 0.65:
-            cascade = min(0.004, cascade_score * 0.002)
-            next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
-            self._push_event(f"STOP_CASCADE score={cascade_score:.3f}")
+        sweep_trigger_score = 0.35 * proximity_score + 0.35 * min(1.0, self.recent_order_participation * 2000) + 0.2 * breakout_score + 0.1 * vol_score
+        if sweep["recent_sweep_flag"] and sweep_trigger_score > 0.55:
+            cascade_score = 0.5 * sweep["recent_sweep_strength"] + 0.25 * breakout_score + 0.2 * min(1.0, self.recent_order_participation * 2000) + 0.05 * vol_score
+            if cascade_score > 0.45:
+                cascade = min(0.004, cascade_score * 0.002)
+                next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
+                self._push_event(f"STOP_CASCADE score={cascade_score:.3f}")
 
         new_dt = pd.to_datetime(self.history["datetime"].iloc[-1], utc=True) + pd.Timedelta(seconds=self.bundle.timeframe_seconds)
         row = {"datetime": new_dt, "open": current_price, "high": max(high, next_close), "low": min(low, next_close), "close": next_close, "volume": float(self.history["volume"].tail(50).mean() * (1 + amplitude * 8))}
