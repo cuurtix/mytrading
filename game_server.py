@@ -36,7 +36,8 @@ def init_game():
     bundle = learn_from_root(str(DATA_ROOT))
     engine = TradingGameEngine(bundle)
     snap = engine.snapshot()
-    return jsonify({"ok": True, "timeframe": engine.bundle.timeframe_label, **snap})
+    initial_candles = engine.history.tail(250).to_dict(orient="records")
+    return jsonify({"ok": True, "timeframe": engine.bundle.timeframe_label, "initial_candles": initial_candles, **snap})
 
 
 @app.post("/api/step")

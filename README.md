@@ -66,3 +66,7 @@ Certaines bornes de gameplay sont conservées (ex: saturation d’impact/FOMO, s
 
 
 Note: CLOSE 10% / 20% / 50% applique ce pourcentage sur **chaque position ouverte**.
+
+- liquidation forcée si equity <= maintenance margin
+
+Les endpoints API renvoient un snapshot complet après chaque action (metrics, positions, last_price, state, timestamp, recent_events).

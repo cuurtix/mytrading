@@ -48,6 +48,9 @@ async function step(){
 async function init(){
   const d = await api('/api/init');
   document.getElementById('status').textContent = `Prêt - timeframe ${d.timeframe}`;
+  labels.length = 0; prices.length = 0;
+  (d.initial_candles || []).forEach(c => { labels.push(c.datetime); prices.push(c.close); });
+  chart.update();
   refreshFromSnapshot({metrics:d.metrics, positions:d.positions});
 }
 

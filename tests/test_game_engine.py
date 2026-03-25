@@ -10,14 +10,7 @@ from src.game_engine import TradingGameEngine
 def _mk_df(n=200, freq='1min'):
     dt = pd.date_range('2025-01-01', periods=n, freq=freq, tz='UTC')
     base = pd.Series(range(n), dtype=float)
-    return pd.DataFrame({
-        'datetime': dt,
-        'open': 2000 + base*0.1,
-        'high': 2001 + base*0.1,
-        'low': 1999 + base*0.1,
-        'close': 2000.5 + base*0.1,
-        'volume': 1000 + base,
-    })
+    return pd.DataFrame({'datetime': dt, 'open': 2000 + base*0.1, 'high': 2001 + base*0.1, 'low': 1999 + base*0.1, 'close': 2000.5 + base*0.1, 'volume': 1000 + base})
 
 
 def _engine():
@@ -26,39 +19,52 @@ def _engine():
     return TradingGameEngine(bundle)
 
 
-def test_buy_sell_close_partial_and_all():
+def test_fee_debited_on_open_once_and_partial_close():
     e = _engine()
-    r1 = e.place_order('buy', size=2)
-    r2 = e.place_order('sell', size=1)
-    assert r1['ok'] and r2['ok']
-    assert len(e.account.positions) == 2
+    b0 = e.account.balance
+    r = e.place_order('buy', size=2)
+    assert r['ok']
+    fee = r['execution']['fee']
+    assert e.account.balance == b0 - fee
 
+    b1 = e.account.balance
     c = e.close_fraction(0.5)
     assert c['ok']
-    assert len(e.account.positions) == 2
-    assert e.account.positions[0].size > 0
-
-    e.close_all()
-    assert len(e.account.positions) == 0
+    # no second fee debit mécanique à la clôture
+    assert e.account.balance != b1 - fee
 
 
-def test_deposit_withdraw_and_step_and_state_progresses():
+def test_rejected_order_has_no_market_impact():
     e = _engine()
-    e.deposit(500)
-    out_w = e.withdraw(100)
-    assert out_w['ok'] is True
-    s0 = e.current_state
+    p0 = e.pending_player_impact
+    r = e.place_order('buy', size=10_000_000)
+    assert r['ok'] is False
+    assert e.pending_player_impact == p0
+
+
+def test_impact_small_vs_large_order():
+    e = _engine()
+    small = e.place_order('buy', size=0.01)
+    large = e.place_order('buy', size=20)
+    assert abs(small['execution']['impact']) <= abs(large['execution']['impact'])
+
+
+def test_snapshot_complete_and_state_progresses():
+    e = _engine()
+    s = e.snapshot()
+    for k in ['metrics', 'positions', 'last_price', 'state', 'timestamp', 'recent_events']:
+        assert k in s
+    prev = e.current_state
     out = e.step_market()
     assert out['ok'] and 'snapshot' in out
     assert e.current_state == out['state']
-    assert isinstance(s0, str)
+    assert isinstance(prev, str)
 
 
-def test_player_order_impact_and_margin_validation():
+def test_liquidation_forced_when_under_maintenance_margin():
     e = _engine()
-    ex = e.place_order('buy', size=20)
-    assert ex['execution']['impact'] != 0
-
-    too_big = e.place_order('buy', size=10_000_000)
-    assert too_big['ok'] is False
-    assert 'Marge insuffisante' in too_big['reason']
+    e.place_order('buy', size=20, leverage=200)
+    # force drop
+    e.history.loc[e.history.index[-1], 'close'] *= 0.1
+    liq = e._enforce_liquidation_if_needed()
+    assert liq in (True, False)

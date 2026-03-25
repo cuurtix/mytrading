@@ -42,3 +42,6 @@ Ces heuristiques restent explicitement assumées pour conserver une jouabilité 
 
 
 Les endpoints de jeu renvoient toujours un snapshot complet (metrics, positions, last_price, state) pour rafraîchissement UI immédiat.
+
+
+Impact joueur: loi de type square-root bornée avec seuil d'activation (petits ordres => impact quasi nul).
