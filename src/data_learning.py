@@ -49,21 +49,24 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
             "dist_low": float((last - float(merged_tf["low"].min())) / max(last, 1e-8)),
             "range": float((merged_tf["high"] - merged_tf["low"]).mean()),
         }
-    merged = (
-        pd.concat([x.dataframe for x in best_group], ignore_index=True)
-        .sort_values("datetime")
-        .drop_duplicates(subset=["datetime"])
-        .reset_index(drop=True)
-    )
-    if len(merged) > cfg.max_total_rows:
-        merged = merged.tail(cfg.max_total_rows).reset_index(drop=True)
-    report.debug.update({"datasets_retained": len(best_group), "rows_merged": len(merged), "timeframe": best_tf})
-    if merged.empty:
+    merged_list: List[pd.DataFrame] = []
+    for ds in best_group:
+        seg = ds.dataframe.sort_values("datetime").drop_duplicates(subset=["datetime"]).reset_index(drop=True)
+        if len(seg) > cfg.max_total_rows:
+            seg = seg.tail(cfg.max_total_rows).reset_index(drop=True)
+        merged_list.append(seg)
+    report.debug.update({"datasets_retained": len(best_group), "rows_merged": int(sum(len(x) for x in merged_list)), "timeframe": best_tf})
+    if not merged_list:
         report.debug.update({"phase": "learn_behavior", "ok": False, "error": "merged_dataset_empty"})
         raise ValueError("Aucun dataset compatible (timeframe)")
 
+    min_learn_rows = min(cfg.min_rows_per_dataset, 20)
+    learn_pairs = [(seg, learn_behavior(seg)) for seg in merged_list if len(seg) >= min_learn_rows]
+    if not learn_pairs:
+        report.debug.update({"phase": "learn_behavior", "ok": False, "error": "no_segment_large_enough"})
+        raise ValueError("Aucun segment suffisant pour apprentissage")
+    merged, learned = max(learn_pairs, key=lambda x: len(x[0]))
     tf_seconds, tf_label = detect_timeframe_seconds(merged["datetime"])
-    learned = learn_behavior(merged)
 
     logs = list(report.logs)
     logs.append(f"timeframe détecté: {tf_label} ({tf_seconds}s)")

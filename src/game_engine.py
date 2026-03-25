@@ -22,7 +22,6 @@ class OnlineStats:
         self.window = window
         self.returns: list[float] = []
         self.vol = 0.0
-        self.avg_range = 0.0
 
     def update(self, candle: Dict[str, float], sweep_flag: int = 0) -> None:
         o = max(1e-8, float(candle["open"]))
@@ -34,7 +33,6 @@ class OnlineStats:
         if len(self.returns) > 10:
             arr = np.array(self.returns, dtype=float)
             self.vol = float(np.std(arr))
-            self.avg_range = float(np.mean(np.abs(arr)))
 
 
 def blend(a: float, b: float, alpha: float = 0.1) -> float:
@@ -626,8 +624,8 @@ class TradingGameEngine:
         wstats = {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08}
 
         base_vol = float(self.bundle.learned.volatility_stats["log_return_sigma"])
-        vol = float(max(1e-6, blend(base_vol, self.online.vol, alpha=0.1)))
-        self.avg_range = float(blend(self.avg_range, max(1e-4, self.online.avg_range * max(float(self.history["close"].iloc[-1]), 1.0)), alpha=0.1))
+        vol = float(max(1e-6, (0.9 * base_vol) + (0.1 * self.online.vol)))
+        self.avg_range = float(blend(self.avg_range, max(1e-4, self.online.vol * max(float(self.history["close"].iloc[-1]), 1.0)), alpha=0.1))
         noise = float(self.rng.normal(0.0, vol * 0.05))
         stochastic_return = float(self.rng.normal(0.0, vol * 0.05))
 
@@ -666,7 +664,7 @@ class TradingGameEngine:
         ob_pull = self.order_block_pull(current_price, self.order_blocks)
         struct_force = self.structure_force(current_price, vol)
         drift = 0.0
-        drift += 0.25 * float(htf_ctx.get("bias", 0.0))
+        drift += 0.3 * float(htf_ctx.get("bias", 0.0))
         vol *= (1.0 + float(htf_ctx.get("vol", 0.0)))
         struct_force += float(current_price * drift * 0.0005)
         residual = current_price * (stochastic_return + noise) * 0.05  # bruit faible, non dominant
