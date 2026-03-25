@@ -23,8 +23,6 @@ class OnlineStats:
         self.returns: list[float] = []
         self.vol = 0.0
         self.avg_range = 0.0
-        self.sweep_freq = 0.0
-        self.trend_strength = 0.0
 
     def update(self, candle: Dict[str, float], sweep_flag: int = 0) -> None:
         o = max(1e-8, float(candle["open"]))
@@ -33,11 +31,14 @@ class OnlineStats:
         self.returns.append(float(r))
         if len(self.returns) > self.window:
             self.returns.pop(0)
-        arr = np.array(self.returns, dtype=float) if self.returns else np.array([0.0])
-        self.vol = float(np.std(arr))
-        self.avg_range = float(np.mean(np.abs(arr)))
-        self.sweep_freq = float((self.sweep_freq * 0.95) + (0.05 * int(bool(sweep_flag))))
-        self.trend_strength = float(np.clip(np.mean(arr[-30:]) / (self.vol + 1e-8), -3.0, 3.0))
+        if len(self.returns) > 5:
+            arr = np.array(self.returns, dtype=float)
+            self.vol = float(np.std(arr))
+            self.avg_range = float(np.mean(np.abs(arr)))
+
+
+def blend(a: float, b: float, alpha: float = 0.1) -> float:
+    return (1 - alpha) * a + alpha * b
 
 
 @dataclass
@@ -178,6 +179,7 @@ class TradingGameEngine:
             "intention": self.current_intention,
             "learning_mode": "boot_plus_online",
             "online_volatility": self.online.vol,
+            "online_vol": self.online.vol,
             "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
             "recent_events": self.recent_events,
             "recent_order_participation": self.recent_order_participation,
@@ -623,10 +625,9 @@ class TradingGameEngine:
         range_sigma = max(self.avg_range * 0.35, 1e-4)
         wstats = {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08}
 
-        alpha = 0.1
-        sigma_boot = float(self.volatility_scale())
-        sigma = float((1 - alpha) * sigma_boot + alpha * max(1e-6, self.online.vol))
-        self.avg_range = float((1 - alpha) * self.avg_range + alpha * max(1e-4, self.online.avg_range * max(float(current_price if "current_price" in locals() else self.history["close"].iloc[-1]), 1.0)))
+        base_vol = float(self.bundle.learned.volatility_stats["log_return_sigma"])
+        sigma = float(max(1e-6, blend(base_vol, self.online.vol, alpha=0.1)))
+        self.avg_range = float(blend(self.avg_range, max(1e-4, self.online.avg_range * max(float(self.history["close"].iloc[-1]), 1.0)), alpha=0.1))
         noise = float(self.rng.normal(0.0, sigma * 0.05))
         stochastic_return = float(self.rng.normal(0.0, sigma * 0.05))
 
@@ -653,7 +654,7 @@ class TradingGameEngine:
                     liquidity_effect = np.log(max(0.01, self.liquidity_high * (1 + hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
 
         current_price = float(self.history["close"].iloc[-1])
-        htf_ctx = self.bundle.htf_context.get("1h") or next(iter(self.bundle.htf_context.values()), {"bias": 0.0, "compression": 0.0})
+        htf_ctx = self.bundle.htf_contexts.get("1h", {})
         self._update_liquidity_pools()
         fvg_levels = self._detect_fvg_levels()
         order_blocks = self._detect_order_blocks()
@@ -664,8 +665,10 @@ class TradingGameEngine:
         fvg_direct_pull = self.fvg_pull(current_price)
         ob_pull = self.order_block_pull(current_price, self.order_blocks)
         struct_force = self.structure_force(current_price, sigma)
-        struct_force += float(current_price * 0.0003 * float(htf_ctx.get("bias", 0.0)))
-        sigma *= (1.0 + min(0.5, abs(float(htf_ctx.get("compression", 0.0))) / max(current_price, 1.0)))
+        drift = 0.0
+        drift += 0.2 * float(htf_ctx.get("bias", 0.0))
+        sigma *= (1.0 + float(htf_ctx.get("vol", 0.0)))
+        struct_force += float(current_price * drift * 0.0005)
         residual = current_price * (stochastic_return + noise) * 0.05  # bruit faible, non dominant
         projected_price = max(
             0.01,

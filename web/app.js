@@ -147,6 +147,7 @@ function refreshFromSnapshot(snap){
   if(snap.state && snap.last_price !== undefined){
     const localTs = snap.timestamp ? new Date(snap.timestamp).toLocaleString() : new Date().toLocaleString();
     const mode = (snap.data_mode || '').toUpperCase();
+    document.getElementById('price').innerText = Number(snap.last_price).toFixed(2);
     setStatus(`Prêt • ${mode || 'REAL DATA'} • state=${snap.state} • last=${Number(snap.last_price).toFixed(2)} • ${localTs} • ${snap.learning_mode || ''}`);
   }
 }

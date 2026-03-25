@@ -290,7 +290,8 @@ def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | N
     timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
     segments, continuity_stats = split_by_continuity(out, timeframe_seconds)
     if segments:
-        out = pd.concat(segments, ignore_index=True)
+        valid = [seg for seg in segments if len(seg) >= cfg.min_rows_per_dataset]
+        out = valid[0] if valid else segments[0]
     timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
     if report:
         report.log(f"[PARSE] timeframe={timeframe_label} ({timeframe_seconds}s) source={source_name}{'::'+sheet_name if sheet_name else ''}")

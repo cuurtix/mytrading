@@ -38,11 +38,15 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
     htf_context: Dict[str, Dict[str, float]] = {}
     for tf, ds_list in groups.items():
         merged_tf = pd.concat([x.dataframe for x in ds_list], ignore_index=True).sort_values("datetime")
+        if len(merged_tf) < 10:
+            continue
+        last = float(merged_tf["close"].iloc[-1])
+        mean_price = float(merged_tf["close"].mean())
         htf_context[tf] = {
-            "bias": float(np.sign((merged_tf["close"].iloc[-1] - merged_tf["close"].iloc[0]) if len(merged_tf) else 0.0)),
-            "dist_to_high": float((merged_tf["high"].max() - merged_tf["close"].iloc[-1]) if len(merged_tf) else 0.0),
-            "dist_to_low": float((merged_tf["close"].iloc[-1] - merged_tf["low"].min()) if len(merged_tf) else 0.0),
-            "compression": float((merged_tf["high"] - merged_tf["low"]).tail(30).mean() if len(merged_tf) else 0.0),
+            "bias": float(np.sign(last - mean_price)),
+            "vol": float(merged_tf["close"].pct_change().std()),
+            "dist_high": float((float(merged_tf["high"].max()) - last) / max(last, 1e-8)),
+            "dist_low": float((last - float(merged_tf["low"].min())) / max(last, 1e-8)),
         }
     merged = (
         pd.concat([x.dataframe for x in best_group], ignore_index=True)
