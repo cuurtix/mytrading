@@ -168,11 +168,6 @@ def _debug_payload() -> Dict[str, Any]:
         }
 
 
-def _start_background_init() -> None:
-    t = threading.Thread(target=_initialize_runtime, daemon=True)
-    t.start()
-
-
 @app.get("/")
 def index():
     return send_from_directory(STATIC, "index.html")
@@ -195,7 +190,7 @@ def init_game():
         status = server_state["status"]
         e = engine
     if status != "ready" or e is None:
-        return jsonify({"ok": False, "loading": True, "reason": "initialization in progress", "debug": _debug_payload()})
+        return jsonify({"ok": False, "loading": True, "retryable": True, "reason": "initialization in progress", "debug": _debug_payload()})
 
     snap = e.snapshot()
     snap["data_mode"] = _debug_payload()["data_mode"]

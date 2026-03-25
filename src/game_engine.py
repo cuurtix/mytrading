@@ -42,29 +42,41 @@ def blend(a: float, b: float, alpha: float = 0.1) -> float:
 class PatternEngine:
     def __init__(self, learned):
         self.learned = learned
-        self.index = 0
-        self.pattern = None
+        self.feature_df = learned.feature_df.copy().reset_index(drop=True)
+        self.ptr = 0
+        self.pattern_signals: list[float] = []
 
-    def pick_pattern(self):
-        df = self.learned.feature_df
-        if len(df) < 31:
-            self.pattern = np.zeros(30, dtype=float)
-            self.index = 0
+    def _refill_signals(self) -> None:
+        df = self.feature_df
+        if len(df) < 40:
+            self.pattern_signals = [0.0] * 24
+            self.ptr = 0
             return
-        start = int(np.random.randint(0, len(df) - 30))
-        segment = df.iloc[start : start + 30]
-        base = float(max(1e-8, segment["close"].iloc[0]))
-        self.pattern = (segment["close"] / base - 1).values
-        self.index = 0
+        start = int(np.random.randint(0, len(df) - 24))
+        seg = df.iloc[start : start + 24].copy()
+        close = seg["close"].astype(float).values
+        ret = np.diff(close) / np.maximum(close[:-1], 1e-8)
+        if len(ret) == 0:
+            ret = np.array([0.0], dtype=float)
+        self.pattern_signals = [float(np.sign(x) * min(abs(x) * 120.0, 2.0)) for x in ret]
+        if not self.pattern_signals:
+            self.pattern_signals = [0.0] * 24
+        self.ptr = 0
 
-    def step(self, price, vol):
-        if self.pattern is None or self.index >= len(self.pattern):
-            self.pick_pattern()
-        move = float(self.pattern[self.index])
-        noise = float(np.random.normal(0, vol))
-        new_price = float(price * (1 + move + noise))
-        self.index += 1
-        return new_price
+    def compute_direction(self, context: Dict[str, float]) -> tuple[float, float]:
+        if not self.pattern_signals or self.ptr >= len(self.pattern_signals):
+            self._refill_signals()
+
+        base_signal = float(self.pattern_signals[self.ptr])
+        self.ptr += 1
+        liq_bias = float(context.get("liquidity_bias", 0.0))
+        fvg_bias = float(context.get("fvg_bias", 0.0))
+        sweep_bias = float(context.get("sweep_bias", 0.0))
+
+        raw = base_signal + (0.9 * liq_bias) + (0.6 * fvg_bias) + (0.8 * sweep_bias)
+        direction = float(np.sign(raw) if raw != 0 else 1.0)
+        strength = float(min(2.0, max(0.2, abs(raw))))
+        return direction, strength
 
 
 @dataclass
@@ -670,7 +682,7 @@ class TradingGameEngine:
 
         base_vol = float(self.bundle.learned.volatility_stats["log_return_sigma"])
         self.current_vol = float(max(1e-6, (0.9 * base_vol) + (0.1 * self.online.vol)))
-        vol = float(self.current_vol)
+        volatility = float(self.current_vol)
         self.avg_range = float(blend(self.avg_range, max(1e-4, self.online.vol * max(float(self.history["close"].iloc[-1]), 1.0)), alpha=0.1))
 
         player_effect = float(self.pending_player_impact)
@@ -680,43 +692,50 @@ class TradingGameEngine:
         order_blocks = self._detect_order_blocks()
         self.order_blocks = order_blocks
 
-        key3 = (
-            str(context.get("state", self.current_state)),
-            str(context.get("vol_regime_bucket", "MID")),
-            session,
-        )
-        direction, amplitude = self._direction_and_amplitude_contextual(key3, str(context.get("state", self.current_state)), context)
-        drift = float(direction * amplitude * current_price * 0.08)
-
         dist_buy = float(context.get("distance_to_nearest_buy_liquidity", 3.0))
         dist_sell = float(context.get("distance_to_nearest_sell_liquidity", 3.0))
-        target = None
-        if dist_buy < 1.0:
-            target = "sell_liquidity"
-        if dist_sell < 1.0:
-            target = "buy_liquidity"
-        if target == "buy_liquidity":
-            drift += abs(drift) * 0.5
-        if target == "sell_liquidity":
-            drift -= abs(drift) * 0.5
+        liquidity_bias = float(np.clip((dist_sell - dist_buy) / max(dist_buy + dist_sell, 1e-6), -1.0, 1.0))
+        sweep_bias = float(context.get("recent_sweep_side", 0))
+        fvg_bias = -1.0 if float(context.get("distance_to_nearest_open_fvg", 3.0)) < 1.0 else 0.0
+
+        near_liquidity = min(dist_buy, dist_sell) < 1.0
+        manipulation_kick = 0.0
+        if near_liquidity:
+            manipulation_kick = -np.sign(liquidity_bias if liquidity_bias != 0 else 1.0) * 0.8
+            if self.rng.random() < 0.6:
+                sweep_bias = -manipulation_kick
 
         if bool(context.get("breakout_up", False)):
-            vol *= 1.5
+            volatility *= 1.5
         if int(context.get("recent_sweep_flag", 0)) == 1:
-            vol *= 1.3
+            volatility *= 1.3
 
-        self.current_drift = float(np.clip(drift / max(current_price, 1e-6), -2.0, 2.0))
-        self.current_vol = float(max(1e-6, vol))
+        cascade_signal = 1.0 if self.current_intention in {"EXPANSION", "TREND"} else 0.0
+        if cascade_signal > 0 and int(context.get("recent_sweep_flag", 0)) == 1:
+            volatility *= 2.0
 
-        intention_price = self.pattern_engine.step(current_price, self.current_vol)
+        self.current_vol = float(max(1e-6, volatility))
+        direction, strength = self.pattern_engine.compute_direction(
+            {
+                "liquidity_bias": liquidity_bias + manipulation_kick,
+                "fvg_bias": fvg_bias,
+                "sweep_bias": sweep_bias,
+            }
+        )
+        step_size = float(current_price * self.current_vol * strength)
+        intention_price = max(0.01, current_price + (direction * step_size))
+
         liquidity_targeting = self.liquidity_force(current_price)
         fvg_direct_pull = self.fvg_pull(current_price)
         ob_pull = self.order_block_pull(current_price, self.order_blocks)
-        struct_force = self.structure_force(current_price, vol)
-        struct_force += float(current_price * self.current_drift * 0.0005)
+        struct_force = self.structure_force(current_price, self.current_vol)
+        attraction = 0.15 * (liquidity_targeting + fvg_direct_pull + ob_pull + struct_force)
+        if near_liquidity:
+            attraction += 0.2 * (liquidity_targeting if abs(liquidity_targeting) > 0 else (-direction * step_size))
+
         projected_price = max(
             0.01,
-            intention_price + drift + player_effect + 0.2 * (liquidity_targeting + fvg_direct_pull + ob_pull + struct_force),
+            intention_price + player_effect + attraction,
         )
         projected_price += 0.02 * (self.fair_price - projected_price)
         self._update_market_structure(projected_price)
@@ -730,6 +749,7 @@ class TradingGameEngine:
             panic_effect = -np.sign(projected_price - current_price) * self.compute_panic()
 
         next_close = max(0.01, projected_price + fomo_effect + panic_effect)
+        self.current_drift = float(np.clip((next_close - current_price) / max(current_price, 1e-6), -2.0, 2.0))
         move = np.log(next_close / max(0.01, current_price))
         direction = int(np.sign(move) or 1)
         self.pending_player_impact *= self.config.pending_impact_decay
@@ -774,7 +794,7 @@ class TradingGameEngine:
                 next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
                 self._push_event(f"STOP_CASCADE score={cascade_score:.3f}")
 
-        if abs(move) > vol * 2.2:
+        if abs(move) > self.current_vol * 2.2:
             gap_low = min(current_price, next_close)
             gap_high = max(current_price, next_close)
             self.fvg_targets.append({"low": gap_low, "high": gap_high, "ttl": 24.0})
@@ -799,7 +819,7 @@ class TradingGameEngine:
         self.history = pd.concat([self.history, pd.DataFrame([row])], ignore_index=True).tail(2000).reset_index(drop=True)
         self.online.update(row, sweep_flag=int(bool(sweep["recent_sweep_flag"])))
         self.current_vol = float(max(1e-6, (0.9 * base_vol) + (0.1 * self.online.vol)))
-        self.current_drift = float(np.clip(drift / max(current_price, 1e-6), -2.0, 2.0))
+        self.current_drift = float(np.clip((next_close - current_price) / max(current_price, 1e-6), -2.0, 2.0))
         self.current_regime = self.compute_regime()
         print("ONLINE VOL:", self.online.vol)
         print("CURRENT VOL:", self.current_vol)
@@ -814,13 +834,13 @@ class TradingGameEngine:
 
         state_map = {"MOVE_TO_LIQUIDITY": "RANGE", "SWEEP": "MANIPULATION", "EXPANSION": "BREAKOUT_ACCEPTED", "TREND": "EXPANSION_UP", "RANGE": "RANGE"}
         self.current_state = state_map.get(self.current_intention, "RANGE")
-        self.update_phase(sigma=vol, move=float(move))
+        self.update_phase(sigma=self.current_vol, move=float(move))
 
-        if self.phase == "accumulation" and abs(move) > vol * 1.15:
+        if self.phase == "accumulation" and abs(move) > self.current_vol * 1.15:
             self._advance_phase()
         elif self.phase == "manipulation":
             self._advance_phase()
-        elif self.phase == "distribution" and abs(move) < vol * 0.9:
+        elif self.phase == "distribution" and abs(move) < self.current_vol * 0.9:
             self._advance_phase()
         self._refresh_liquidity_zones()
         self._enforce_liquidation_if_needed()
