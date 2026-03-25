@@ -64,6 +64,7 @@ class TradingGameEngine:
         }
         self.liquidity = {"buyside": [], "sellside": []}
         self.last_sweep = False
+        self.order_blocks: list[dict[str, float]] = []
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -283,7 +284,7 @@ class TradingGameEngine:
 
     def liquidity_force(self, price: float) -> float:
         target = self.get_liquidity_target(price)
-        return (target - price) * 0.08
+        return (target - price) * 0.1
 
     def _fvg_attraction(self, price: float, fvg_levels: list[dict[str, float]]) -> float:
         if not fvg_levels:
@@ -296,13 +297,21 @@ class TradingGameEngine:
         d = self.fvg.nearest_open_distance(price)
         if np.isnan(d):
             return 0.0
-        return float(-np.sign(d) * min(abs(float(d)), 1.0) * 0.03)
+        return float(-np.sign(d) * min(abs(float(d)), 1.0) * 0.05)
 
     def order_block_pull(self, price: float, order_blocks: list[dict[str, float]]) -> float:
         if not order_blocks:
             return 0.0
         ob = order_blocks[-1]
         return (float(ob["close"]) - price) * 0.05
+
+    def structure_force(self, price: float, sigma: float) -> float:
+        trend = self.market_structure.get("trend", "range")
+        if trend == "bullish":
+            return abs(price) * sigma * 0.35
+        if trend == "bearish":
+            return -abs(price) * sigma * 0.35
+        return 0.0
 
     def compute_fomo(self) -> float:
         if self.market_structure["bos"] and self.amd_phase == "EXPANSION":
@@ -502,22 +511,19 @@ class TradingGameEngine:
         range_stats = self.bundle.learned.conditional_ranges.get(key, {"mu": self.bundle.learned.volatility_stats["range_mean"], "sigma": self.bundle.learned.volatility_stats["range_mean"] * 0.3})
         wstats = self.bundle.learned.conditional_wicks.get(key, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08})
 
-        direction, amplitude = self._direction_and_amplitude_contextual(key, next_state, ref)
-        base_move = float(direction * amplitude)
         sigma = float(max(1e-6, self.bundle.learned.volatility_stats["log_return_sigma"]))
-        drift = float(self.bundle.learned.volatility_stats["log_return_mu"])
-        noise = float(self.rng.normal(0.0, sigma * 0.25))
+        noise = float(self.rng.normal(0.0, sigma * 0.08))
+        stochastic_return = float(self.rng.normal(0.0, sigma * 0.1))
 
         if self.phase == "accumulation":
-            drift *= 0.35
-            noise *= 0.25
-            base_move *= 0.45
+            noise *= 0.5
+            stochastic_return *= 0.4
         elif self.phase == "manipulation":
-            noise *= 0.35
-            base_move *= 0.6
+            noise *= 0.8
+            stochastic_return *= 0.6
         else:  # distribution
-            noise *= 0.45
-            base_move *= 1.3
+            noise *= 1.0
+            stochastic_return *= 0.8
 
         player_effect = float(self.pending_player_impact)
         liquidity_effect = 0.0
@@ -525,7 +531,8 @@ class TradingGameEngine:
             self._refresh_liquidity_zones()
             if self.rng.random() < 0.3 and np.isfinite(self.liquidity_high) and np.isfinite(self.liquidity_low):
                 hunt = float(self.rng.uniform(0.0003, 0.002))
-                if direction >= 0:
+                dir_hint = 1 if self.market_structure.get("trend", "range") != "bearish" else -1
+                if dir_hint >= 0:
                     liquidity_effect = np.log(max(0.01, self.liquidity_low * (1 - hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
                 else:
                     liquidity_effect = np.log(max(0.01, self.liquidity_high * (1 + hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
@@ -534,31 +541,27 @@ class TradingGameEngine:
         self._update_liquidity_pools()
         fvg_levels = self._detect_fvg_levels()
         order_blocks = self._detect_order_blocks()
+        self.order_blocks = order_blocks
 
-        trend_component = current_price * (drift + base_move + noise)
-        mean_reversion = self._mean_reversion(current_price) * 0.5
-        fvg_attraction = self._fvg_attraction(current_price, fvg_levels)
         liquidity_targeting = self.liquidity_force(current_price)
-        ob_pull = self.order_block_pull(current_price, order_blocks)
         fvg_direct_pull = self.fvg_pull(current_price)
-
-        projected_price = max(
-            0.01,
-            current_price + trend_component + liquidity_targeting + fvg_attraction + ob_pull + fvg_direct_pull + mean_reversion + liquidity_effect + player_effect,
-        )
+        ob_pull = self.order_block_pull(current_price, self.order_blocks)
+        struct_force = self.structure_force(current_price, sigma)
+        residual = current_price * (stochastic_return + noise) * 0.15  # faible résiduel non-dominant
+        projected_price = max(0.01, current_price + liquidity_targeting + fvg_direct_pull + ob_pull + struct_force + liquidity_effect + player_effect + residual)
         self._update_market_structure(projected_price)
 
-        fomo_effect = abs(projected_price - current_price) * self.compute_fomo()
+        fomo_effect = self.compute_fomo()
         pre_sweep = self._detect_sweep(max(current_price, projected_price), min(current_price, projected_price), projected_price)
         panic_effect = 0.0
         if pre_sweep:
             self.last_sweep = True
         if self.last_sweep and self.market_structure["choch"]:
-            panic_effect = -abs(projected_price - current_price) * self.compute_panic()
+            panic_effect = -self.compute_panic()
 
         next_close = max(0.01, projected_price + fomo_effect + panic_effect)
         move = np.log(next_close / max(0.01, current_price))
-        direction = int(np.sign(move) or direction)
+        direction = int(np.sign(move) or 1)
         self.pending_player_impact *= self.config.pending_impact_decay
 
         candle_range = max(1e-8, self.rng.normal(range_stats["mu"], range_stats["sigma"]))
