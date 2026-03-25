@@ -63,3 +63,6 @@ Puis ouvrir: `http://127.0.0.1:8000`
 ## Heuristiques assumées
 
 Certaines bornes de gameplay sont conservées (ex: saturation d’impact/FOMO, seuils de bucket relatifs), explicitement documentées comme compromis jouabilité/réalisme.
+
+
+Note: CLOSE 10% / 20% / 50% applique ce pourcentage sur **chaque position ouverte**.

@@ -28,11 +28,13 @@ def _engine():
 
 def test_buy_sell_close_partial_and_all():
     e = _engine()
-    e.place_order('buy', size=2)
-    e.place_order('sell', size=1)
+    r1 = e.place_order('buy', size=2)
+    r2 = e.place_order('sell', size=1)
+    assert r1['ok'] and r2['ok']
     assert len(e.account.positions) == 2
 
-    e.close_fraction(0.5)
+    c = e.close_fraction(0.5)
+    assert c['ok']
     assert len(e.account.positions) == 2
     assert e.account.positions[0].size > 0
 
@@ -40,16 +42,23 @@ def test_buy_sell_close_partial_and_all():
     assert len(e.account.positions) == 0
 
 
-def test_deposit_withdraw_and_step():
+def test_deposit_withdraw_and_step_and_state_progresses():
     e = _engine()
     e.deposit(500)
-    ok = e.withdraw(100)
-    assert ok is True
+    out_w = e.withdraw(100)
+    assert out_w['ok'] is True
+    s0 = e.current_state
     out = e.step_market()
-    assert 'metrics' in out and 'candle' in out
+    assert out['ok'] and 'snapshot' in out
+    assert e.current_state == out['state']
+    assert isinstance(s0, str)
 
 
-def test_player_order_impact_is_recorded():
+def test_player_order_impact_and_margin_validation():
     e = _engine()
-    ex = e.place_order('buy', size=5000)
-    assert ex['impact'] != 0
+    ex = e.place_order('buy', size=20)
+    assert ex['execution']['impact'] != 0
+
+    too_big = e.place_order('buy', size=10_000_000)
+    assert too_big['ok'] is False
+    assert 'Marge insuffisante' in too_big['reason']

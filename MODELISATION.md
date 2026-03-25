@@ -39,3 +39,6 @@ Les ordres influencent:
 - coefficients de conversion ordre->impact
 - seuils de bucket relatifs
 Ces heuristiques restent explicitement assumées pour conserver une jouabilité stable en local.
+
+
+Les endpoints de jeu renvoient toujours un snapshot complet (metrics, positions, last_price, state) pour rafraîchissement UI immédiat.

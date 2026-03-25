@@ -35,8 +35,8 @@ def init_game():
     global engine
     bundle = learn_from_root(str(DATA_ROOT))
     engine = TradingGameEngine(bundle)
-    m = engine._mark_to_market(float(engine.history["close"].iloc[-1]))
-    return jsonify({"ok": True, "metrics": m, "timeframe": engine.bundle.timeframe_label})
+    snap = engine.snapshot()
+    return jsonify({"ok": True, "timeframe": engine.bundle.timeframe_label, **snap})
 
 
 @app.post("/api/step")
@@ -49,8 +49,7 @@ def step():
 def order():
     e = _ensure_engine()
     data: Dict[str, Any] = request.json or {}
-    res = e.place_order(side=data.get("side", "buy"), size=float(data.get("size", 1.0)), leverage=int(data.get("leverage", 50)))
-    return jsonify({"ok": True, "execution": res})
+    return jsonify(e.place_order(side=data.get("side", "buy"), size=float(data.get("size", 1.0)), leverage=int(data.get("leverage", 50))))
 
 
 @app.post("/api/close")
@@ -58,31 +57,27 @@ def close():
     e = _ensure_engine()
     data = request.json or {}
     fraction = float(data.get("fraction", 1.0))
-    res = e.close_fraction(fraction)
-    return jsonify({"ok": True, **res})
+    return jsonify(e.close_fraction(fraction))
 
 
 @app.post("/api/deposit")
 def deposit():
     e = _ensure_engine()
     amt = float((request.json or {}).get("amount", 0.0))
-    e.deposit(amt)
-    return jsonify({"ok": True})
+    return jsonify(e.deposit(amt))
 
 
 @app.post("/api/withdraw")
 def withdraw():
     e = _ensure_engine()
     amt = float((request.json or {}).get("amount", 0.0))
-    ok = e.withdraw(amt)
-    return jsonify({"ok": ok})
+    return jsonify(e.withdraw(amt))
 
 
 @app.post("/api/reset")
 def reset():
     e = _ensure_engine()
-    e.reset()
-    return jsonify({"ok": True})
+    return jsonify(e.reset())
 
 
 if __name__ == "__main__":

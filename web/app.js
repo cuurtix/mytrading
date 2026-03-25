@@ -27,22 +27,28 @@ function renderPositions(ps){
   document.getElementById('positions').innerHTML = ps.map(p => `#${p.id} ${p.side} size=${p.size.toFixed(2)} entry=${p.entry.toFixed(2)} lev=${p.leverage}`).join('<br/>') || 'Aucune';
 }
 
+function refreshFromSnapshot(snap){
+  if(!snap) return;
+  renderMetrics(snap.metrics);
+  renderPositions(snap.positions || []);
+}
+
 async function step(){
   const d = await api('/api/step');
+  if(!d.ok) return;
   const c = d.candle;
   labels.push(c.datetime);
   prices.push(c.close);
   if(labels.length>300){labels.shift(); prices.shift();}
   chart.update();
-  renderMetrics(d.metrics);
-  renderPositions(d.positions);
+  refreshFromSnapshot(d.snapshot);
   logEvent(`state=${d.state} close=${c.close.toFixed(2)} sweep=${d.sweep.recent_sweep_flag}`);
 }
 
 async function init(){
   const d = await api('/api/init');
   document.getElementById('status').textContent = `Prêt - timeframe ${d.timeframe}`;
-  renderMetrics(d.metrics);
+  refreshFromSnapshot({metrics:d.metrics, positions:d.positions});
 }
 
 function runLoop(){
@@ -57,18 +63,22 @@ document.getElementById('btnPause').onclick = ()=>{ running=false; if(timer) cle
 
 document.getElementById('buy').onclick = async()=>{
   const size=Number(document.getElementById('size').value); const lev=Number(document.getElementById('leverage').value);
-  const r=await api('/api/order',{side:'buy',size,leverage:lev}); logEvent(`BUY fill=${r.execution.fill.toFixed(2)}`);
+  const r=await api('/api/order',{side:'buy',size,leverage:lev});
+  refreshFromSnapshot(r.snapshot);
+  logEvent(r.ok?`BUY fill=${r.execution.fill.toFixed(2)}`:`BUY refusé: ${r.reason}`);
 };
 document.getElementById('sell').onclick = async()=>{
   const size=Number(document.getElementById('size').value); const lev=Number(document.getElementById('leverage').value);
-  const r=await api('/api/order',{side:'sell',size,leverage:lev}); logEvent(`SELL fill=${r.execution.fill.toFixed(2)}`);
+  const r=await api('/api/order',{side:'sell',size,leverage:lev});
+  refreshFromSnapshot(r.snapshot);
+  logEvent(r.ok?`SELL fill=${r.execution.fill.toFixed(2)}`:`SELL refusé: ${r.reason}`);
 };
-document.getElementById('closeAll').onclick = async()=>{ const r=await api('/api/close',{fraction:1}); logEvent(`Close all realized=${r.realized.toFixed(2)}`); };
-document.getElementById('close10').onclick = async()=>{ const r=await api('/api/close',{fraction:0.1}); logEvent(`Close 10% realized=${r.realized.toFixed(2)}`); };
-document.getElementById('close20').onclick = async()=>{ const r=await api('/api/close',{fraction:0.2}); logEvent(`Close 20% realized=${r.realized.toFixed(2)}`); };
-document.getElementById('close50').onclick = async()=>{ const r=await api('/api/close',{fraction:0.5}); logEvent(`Close 50% realized=${r.realized.toFixed(2)}`); };
-document.getElementById('deposit').onclick = async()=>{ const amount=Number(document.getElementById('cashAmount').value); await api('/api/deposit',{amount}); logEvent(`Deposit ${amount}`); };
-document.getElementById('withdraw').onclick = async()=>{ const amount=Number(document.getElementById('cashAmount').value); const r=await api('/api/withdraw',{amount}); logEvent(r.ok?`Withdraw ${amount}`:'Withdraw refusé (marge)'); };
-document.getElementById('reset').onclick = async()=>{ await api('/api/reset'); labels.length=0; prices.length=0; chart.update(); logEvent('RESET TOTAL'); await init(); };
+document.getElementById('closeAll').onclick = async()=>{ const r=await api('/api/close',{fraction:1}); refreshFromSnapshot(r.snapshot); logEvent(`Close all realized=${r.realized.toFixed(2)}`); };
+document.getElementById('close10').onclick = async()=>{ const r=await api('/api/close',{fraction:0.1}); refreshFromSnapshot(r.snapshot); logEvent(`Close 10% realized=${r.realized.toFixed(2)}`); };
+document.getElementById('close20').onclick = async()=>{ const r=await api('/api/close',{fraction:0.2}); refreshFromSnapshot(r.snapshot); logEvent(`Close 20% realized=${r.realized.toFixed(2)}`); };
+document.getElementById('close50').onclick = async()=>{ const r=await api('/api/close',{fraction:0.5}); refreshFromSnapshot(r.snapshot); logEvent(`Close 50% realized=${r.realized.toFixed(2)}`); };
+document.getElementById('deposit').onclick = async()=>{ const amount=Number(document.getElementById('cashAmount').value); const r=await api('/api/deposit',{amount}); refreshFromSnapshot(r.snapshot); logEvent(`Deposit ${amount}`); };
+document.getElementById('withdraw').onclick = async()=>{ const amount=Number(document.getElementById('cashAmount').value); const r=await api('/api/withdraw',{amount}); refreshFromSnapshot(r.snapshot); logEvent(r.ok?`Withdraw ${amount}`:`Withdraw refusé (${r.reason})`); };
+document.getElementById('reset').onclick = async()=>{ const r=await api('/api/reset'); labels.length=0; prices.length=0; chart.update(); refreshFromSnapshot(r.snapshot); logEvent('RESET TOTAL'); await init(); };
 
 init();

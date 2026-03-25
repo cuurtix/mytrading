@@ -38,6 +38,7 @@ class TradingGameEngine:
         self.account = GameAccount()
         self.next_pos_id = 1
         self.pending_player_impact = 0.0
+        self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
 
         self.lmap = LiquidityMap()
         self.fvg = FVGBook()
@@ -62,14 +63,24 @@ class TradingGameEngine:
             margin += (p.entry * p.size) / max(p.leverage, 1)
         equity = self.account.balance + upnl
         return {
-            "balance": self.account.balance,
-            "equity": equity,
-            "unrealized_pnl": upnl,
-            "realized_pnl": self.account.realized_pnl,
-            "margin_used": margin,
-            "free_margin": equity - margin,
-            "exposure": exposure,
+            "balance": float(self.account.balance),
+            "equity": float(equity),
+            "unrealized_pnl": float(upnl),
+            "realized_pnl": float(self.account.realized_pnl),
+            "margin_used": float(margin),
+            "free_margin": float(equity - margin),
+            "exposure": float(exposure),
             "open_positions": len(self.account.positions),
+        }
+
+    def snapshot(self) -> Dict[str, object]:
+        last_price = float(self.history["close"].iloc[-1])
+        return {
+            "metrics": self._mark_to_market(last_price),
+            "positions": [p.__dict__ for p in self.account.positions],
+            "last_price": last_price,
+            "state": self.current_state,
+            "timestamp": str(self.history["datetime"].iloc[-1]),
         }
 
     def _apply_player_impact(self, side: str, size: float, local_volume: float, local_liquidity_strength: float) -> Dict[str, float]:
@@ -79,7 +90,7 @@ class TradingGameEngine:
         self.pending_player_impact += impact
         return {"impact": float(impact), "spread_widen": float(spread_widen), "slippage": float(abs(impact) * 0.5)}
 
-    def place_order(self, side: str, size: float, leverage: int = 50) -> Dict[str, float]:
+    def place_order(self, side: str, size: float, leverage: int = 50) -> Dict[str, object]:
         last = self.history.iloc[-1]
         local_volume = float(self.history["volume"].tail(30).mean())
         liq = self.lmap.nearest_distances(float(last["close"]), local_scale=float(self.history["close"].pct_change().std() or 1.0))
@@ -91,6 +102,12 @@ class TradingGameEngine:
         fill = mid + spread / 2 + exec_impact["slippage"] if side == "buy" else mid - spread / 2 - exec_impact["slippage"]
         fee = abs(fill * size) * 0.0002
 
+        # Validation marge
+        margin_required = (abs(fill * size) / max(leverage, 1))
+        free_margin = self._mark_to_market(mid)["free_margin"]
+        if free_margin < (margin_required + fee):
+            return {"ok": False, "reason": "Marge insuffisante", "required_margin": margin_required, "free_margin": free_margin, "snapshot": self.snapshot()}
+
         pos = GamePosition(
             id=self.next_pos_id,
             side="long" if side == "buy" else "short",
@@ -101,9 +118,9 @@ class TradingGameEngine:
         )
         self.next_pos_id += 1
         self.account.positions.append(pos)
-        return {"fill": float(fill), "fee": float(fee), **exec_impact}
+        return {"ok": True, "execution": {"fill": float(fill), "fee": float(fee), **exec_impact}, "snapshot": self.snapshot()}
 
-    def close_fraction(self, fraction: float) -> Dict[str, float]:
+    def close_fraction(self, fraction: float) -> Dict[str, object]:
         fraction = max(0.0, min(1.0, fraction))
         price = float(self.history["close"].iloc[-1])
         realized = 0.0
@@ -120,27 +137,27 @@ class TradingGameEngine:
         self.account.positions = remaining
         self.account.balance += realized
         self.account.realized_pnl += realized
-        return {"realized": float(realized)}
+        return {"ok": True, "realized": float(realized), "fraction_applied_each_position": fraction, "snapshot": self.snapshot()}
 
-    def close_all(self) -> Dict[str, float]:
+    def close_all(self) -> Dict[str, object]:
         return self.close_fraction(1.0)
 
-    def deposit(self, amount: float) -> None:
+    def deposit(self, amount: float) -> Dict[str, object]:
         self.account.balance += max(0.0, amount)
+        return {"ok": True, "snapshot": self.snapshot()}
 
-    def withdraw(self, amount: float) -> bool:
+    def withdraw(self, amount: float) -> Dict[str, object]:
         m = self._mark_to_market(float(self.history["close"].iloc[-1]))
         amount = max(0.0, amount)
         if m["free_margin"] - amount < 0:
-            return False
+            return {"ok": False, "reason": "Retrait impossible (marge)", "snapshot": self.snapshot()}
         self.account.balance -= amount
-        return True
+        return {"ok": True, "snapshot": self.snapshot()}
 
     def step_market(self) -> Dict[str, object]:
         feat = add_market_features(self.history.tail(300).copy())
         ref = feat.iloc[-1]
-        current_state = str(self.bundle.learned.feature_df["state"].iloc[-1]) if "state" in self.bundle.learned.feature_df.columns else "RANGE"
-        next_state = sample_next_state(current_state, ref, self.bundle.learned.transition_model.transition_probs, self.rng)
+        next_state = sample_next_state(self.current_state, ref, self.bundle.learned.transition_model.transition_probs, self.rng)
 
         vol_bucket = str(ref.get("vol_regime_bucket", "NORMAL"))
         session = str(ref.get("session_name", "LONDON_OPEN"))
@@ -153,7 +170,6 @@ class TradingGameEngine:
         direction = 1 if sampled >= 0 else -1
         amplitude = abs(sampled)
 
-        # bounded FOMO + player impact + stop hunt cascade
         if next_state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN"}:
             amplitude *= min(1.8, 1.0 + rstats.get("cont_3", 0.5))
         amplitude += abs(self.pending_player_impact)
@@ -168,7 +184,6 @@ class TradingGameEngine:
 
         local_scale = float(feat["range"].tail(30).mean() or 1.0)
         sweep = self.lmap.detect_sweep(len(self.history), high, low, next_close)
-        # stop hunt / cascade effect
         if sweep["recent_sweep_flag"]:
             cascade = min(0.003, sweep["recent_sweep_strength"] * 3)
             next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
@@ -192,15 +207,9 @@ class TradingGameEngine:
         self.fvg.detect_new(pd.concat([self.history[["high", "low"]].tail(2), tmp], ignore_index=True), 2, state=next_state, session=session)
         self.fvg.update_fill(len(self.history), row["high"], row["low"])
 
-        metrics = self._mark_to_market(float(next_close))
-        return {
-            "candle": row,
-            "metrics": metrics,
-            "state": next_state,
-            "sweep": sweep,
-            "fvg_open": self.fvg.open_count_nearby(float(next_close), threshold=local_scale * 1.5),
-            "positions": [p.__dict__ for p in self.account.positions],
-        }
+        self.current_state = next_state
+        return {"ok": True, "candle": row, "state": next_state, "sweep": sweep, "snapshot": self.snapshot()}
 
-    def reset(self) -> None:
+    def reset(self) -> Dict[str, object]:
         self.__init__(self.bundle)
+        return {"ok": True, "snapshot": self.snapshot()}
