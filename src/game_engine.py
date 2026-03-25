@@ -63,6 +63,7 @@ class TradingGameEngine:
             "choch": False,
         }
         self.liquidity = {"buyside": [], "sellside": []}
+        self.last_sweep = False
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -274,12 +275,15 @@ class TradingGameEngine:
                 obs.append({"open": float(prev["open"]), "high": float(prev["high"]), "low": float(prev["low"]), "close": float(prev["close"])})
         return obs[-15:]
 
-    def _liquidity_targeting(self, price: float) -> float:
+    def get_liquidity_target(self, price: float) -> float:
         levels = [*self.liquidity["buyside"], *self.liquidity["sellside"]]
         if not levels:
-            return 0.0
-        target = min(levels, key=lambda lvl: abs(lvl - price))
-        return (float(target) - price) * 0.05
+            return price
+        return float(min(levels, key=lambda lvl: abs(lvl - price)))
+
+    def liquidity_force(self, price: float) -> float:
+        target = self.get_liquidity_target(price)
+        return (target - price) * 0.08
 
     def _fvg_attraction(self, price: float, fvg_levels: list[dict[str, float]]) -> float:
         if not fvg_levels:
@@ -287,6 +291,28 @@ class TradingGameEngine:
         nearest = min(fvg_levels, key=lambda z: abs(((z["low"] + z["high"]) / 2.0) - price))
         mid = (nearest["low"] + nearest["high"]) / 2.0
         return (mid - price) * 0.03
+
+    def fvg_pull(self, price: float) -> float:
+        d = self.fvg.nearest_open_distance(price)
+        if np.isnan(d):
+            return 0.0
+        return float(-np.sign(d) * min(abs(float(d)), 1.0) * 0.03)
+
+    def order_block_pull(self, price: float, order_blocks: list[dict[str, float]]) -> float:
+        if not order_blocks:
+            return 0.0
+        ob = order_blocks[-1]
+        return (float(ob["close"]) - price) * 0.05
+
+    def compute_fomo(self) -> float:
+        if self.market_structure["bos"] and self.amd_phase == "EXPANSION":
+            return float(self.rng.uniform(0.2, 0.6))
+        return 0.0
+
+    def compute_panic(self) -> float:
+        if self.last_sweep and self.market_structure["choch"]:
+            return float(self.rng.uniform(0.4, 0.8))
+        return 0.0
 
     def _mean_reversion(self, price: float) -> float:
         anchor = float(self.history["close"].tail(80).mean() or price)
@@ -299,6 +325,26 @@ class TradingGameEngine:
     def _advance_amd_phase(self) -> None:
         self.amd_phase_idx = (self.amd_phase_idx + 1) % len(self.amd_phase_cycle)
         self.amd_phase = self.amd_phase_cycle[self.amd_phase_idx]
+
+    def _trend_exhausted(self, move: float, sigma: float) -> bool:
+        recent = self.history["close"].pct_change().tail(8).dropna()
+        if recent.empty:
+            return False
+        weak = abs(float(recent.mean())) < sigma * 0.2
+        flip = np.sign(float(recent.iloc[-1])) != np.sign(move)
+        return bool(weak or flip)
+
+    def update_phase(self, sigma: float, move: float) -> None:
+        if self.amd_phase == "ACCUMULATION":
+            if abs(move) > sigma * 0.8:
+                self._advance_amd_phase()
+        elif self.amd_phase == "MANIPULATION":
+            if self.last_sweep:
+                self._advance_amd_phase()
+        elif self.amd_phase == "EXPANSION":
+            if self._trend_exhausted(move, sigma):
+                self._advance_amd_phase()
+                self.last_sweep = False
 
     # -------- impact model --------
     def _local_executable_volume_notional(self, session: str, local_notional: float, liquidity_strength: float) -> float:
@@ -460,17 +506,17 @@ class TradingGameEngine:
         base_move = float(direction * amplitude)
         sigma = float(max(1e-6, self.bundle.learned.volatility_stats["log_return_sigma"]))
         drift = float(self.bundle.learned.volatility_stats["log_return_mu"])
-        noise = float(self.rng.normal(0.0, sigma))
+        noise = float(self.rng.normal(0.0, sigma * 0.25))
 
         if self.phase == "accumulation":
             drift *= 0.35
-            noise *= 0.45
+            noise *= 0.25
             base_move *= 0.45
         elif self.phase == "manipulation":
-            noise *= 0.9
+            noise *= 0.35
             base_move *= 0.6
         else:  # distribution
-            noise *= 1.2
+            noise *= 0.45
             base_move *= 1.3
 
         player_effect = float(self.pending_player_impact)
@@ -490,20 +536,25 @@ class TradingGameEngine:
         order_blocks = self._detect_order_blocks()
 
         trend_component = current_price * (drift + base_move + noise)
-        mean_reversion = self._mean_reversion(current_price)
+        mean_reversion = self._mean_reversion(current_price) * 0.5
         fvg_attraction = self._fvg_attraction(current_price, fvg_levels)
-        liquidity_targeting = self._liquidity_targeting(current_price)
+        liquidity_targeting = self.liquidity_force(current_price)
+        ob_pull = self.order_block_pull(current_price, order_blocks)
+        fvg_direct_pull = self.fvg_pull(current_price)
 
-        projected_price = max(0.01, current_price + trend_component + mean_reversion + fvg_attraction + liquidity_targeting + liquidity_effect + player_effect)
+        projected_price = max(
+            0.01,
+            current_price + trend_component + liquidity_targeting + fvg_attraction + ob_pull + fvg_direct_pull + mean_reversion + liquidity_effect + player_effect,
+        )
         self._update_market_structure(projected_price)
 
-        fomo_effect = 0.0
-        panic_effect = 0.0
-        if self.market_structure["bos"] and self.amd_phase == "EXPANSION":
-            fomo_effect = abs(projected_price - current_price) * float(self.rng.uniform(0.2, 0.6))
+        fomo_effect = abs(projected_price - current_price) * self.compute_fomo()
         pre_sweep = self._detect_sweep(max(current_price, projected_price), min(current_price, projected_price), projected_price)
-        if pre_sweep and self.market_structure["choch"]:
-            panic_effect = -abs(projected_price - current_price) * float(self.rng.uniform(0.4, 0.8))
+        panic_effect = 0.0
+        if pre_sweep:
+            self.last_sweep = True
+        if self.last_sweep and self.market_structure["choch"]:
+            panic_effect = -abs(projected_price - current_price) * self.compute_panic()
 
         next_close = max(0.01, projected_price + fomo_effect + panic_effect)
         move = np.log(next_close / max(0.01, current_price))
@@ -529,6 +580,13 @@ class TradingGameEngine:
             next_close = max(0.01, current_price + (next_close - current_price) * self.config.fvg_rebalance_damping)
         sweep = self.lmap.detect_sweep(len(self.history), high, low, next_close)
         structural_sweep = self._detect_sweep(high, low, next_close)
+        if sweep["recent_sweep_flag"] or structural_sweep is not None:
+            self.last_sweep = True
+            # sweep drives possible reversal (trap then reverse)
+            if self.market_structure["trend"] == "bullish":
+                self.market_structure["trend"] = "bearish"
+            elif self.market_structure["trend"] == "bearish":
+                self.market_structure["trend"] = "bullish"
 
         # sweep/cascade conditionnelle corrélée participation/liquidité/état/vol
         proximity_score = max(0.0, 1.0 - min(liq_dist["distance_to_nearest_buy_liquidity"], liq_dist["distance_to_nearest_sell_liquidity"]))
@@ -573,12 +631,7 @@ class TradingGameEngine:
         self.fvg.update_fill(len(self.history), row["high"], row["low"])
 
         self.current_state = next_state
-        if self.amd_phase == "ACCUMULATION" and abs(move) > sigma * 0.9:
-            self._advance_amd_phase()
-        elif self.amd_phase == "MANIPULATION" and (structural_sweep is not None or sweep["recent_sweep_flag"]):
-            self._advance_amd_phase()
-        elif self.amd_phase == "EXPANSION" and abs(move) < sigma * 0.75:
-            self._advance_amd_phase()
+        self.update_phase(sigma=sigma, move=float(move))
 
         if self.phase == "accumulation" and abs(move) > sigma * 1.15:
             self._advance_phase()
@@ -600,6 +653,7 @@ class TradingGameEngine:
             "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
             "fvg_levels": fvg_levels[-10:],
             "order_blocks": order_blocks[-10:],
+            "last_sweep": self.last_sweep,
             "snapshot": self.snapshot(),
         }
 
