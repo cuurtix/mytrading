@@ -146,6 +146,35 @@ def sanitize_ohlc(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     return df, before - len(df)
 
 
+def validate_dataset_continuity(df: pd.DataFrame, timeframe_seconds: int) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    stats = {"gaps_detected": 0, "gaps_filled": 0, "rows_removed": 0}
+    if df.empty or timeframe_seconds <= 0:
+        return df, stats
+
+    time_diffs = df["datetime"].diff().dt.total_seconds()
+    large_gaps = time_diffs > (timeframe_seconds * 3)
+    stats["gaps_detected"] = int(large_gaps.sum())
+    if stats["gaps_detected"] == 0:
+        return df, stats
+
+    gap_indices = df[large_gaps].index.tolist()
+    segments: List[Tuple[int, int]] = []
+    start = 0
+    for gap_idx in gap_indices:
+        if gap_idx > start:
+            segments.append((start, gap_idx - 1))
+        start = gap_idx
+    if start < len(df):
+        segments.append((start, len(df) - 1))
+    if not segments:
+        return df, stats
+
+    longest = max(segments, key=lambda x: x[1] - x[0])
+    df_clean = df.iloc[longest[0] : longest[1] + 1].copy().reset_index(drop=True)
+    stats["rows_removed"] = int(len(df) - len(df_clean))
+    return df_clean, stats
+
+
 def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | None, source_type: str, report: IngestionReport | None = None, cfg: IngestionConfig | None = None) -> NormalizedDataset:
     cfg = cfg or IngestionConfig()
     mapping = _map_columns(df)
@@ -164,9 +193,13 @@ def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | N
     if len(out) > cfg.max_rows_per_dataset:
         out = out.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
     timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
+    out, continuity_stats = validate_dataset_continuity(out, timeframe_seconds)
+    timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
     if report:
         report.log(f"[PARSE] timeframe={timeframe_label} ({timeframe_seconds}s) source={source_name}{'::'+sheet_name if sheet_name else ''}")
         report.log(f"[PARSE] invalid rows removed={removed} source={source_name}{'::'+sheet_name if sheet_name else ''}")
+        if continuity_stats["gaps_detected"] > 0:
+            report.log(f"[CONTINUITY] source={source_name}{'::'+sheet_name if sheet_name else ''} gaps={continuity_stats['gaps_detected']} rows_removed={continuity_stats['rows_removed']}")
 
     return NormalizedDataset(source_name, source_type, sheet_name, timeframe_seconds, timeframe_label, {k: str(v) for k, v in mapping.items()}, out)
 

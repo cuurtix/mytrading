@@ -26,7 +26,34 @@ class LearnedBehavior:
     conditional_ranges: Dict[Key3, Dict[str, float]]
     conditional_wicks: Dict[Key3, Dict[str, float]]
     market_profile: Dict[str, float]
+    historical_contexts: pd.DataFrame
+    context_index: Dict[str, list[int]]
     feature_df: pd.DataFrame
+
+    def find_similar_contexts(self, current_context: Dict[str, float], state: str, n_neighbors: int = 10) -> list[int]:
+        if state not in self.context_index:
+            return []
+        candidates = self.context_index[state]
+        if len(candidates) <= n_neighbors:
+            return candidates
+
+        features = [
+            "realized_vol",
+            "distance_to_nearest_buy_liquidity",
+            "distance_to_nearest_sell_liquidity",
+            "compression_score",
+            "expansion_score",
+            "recent_sweep_strength",
+        ]
+        distances: list[tuple[float, int]] = []
+        for idx in candidates:
+            hist_row = self.historical_contexts.iloc[idx]
+            d = 0.0
+            for f in features:
+                d += (float(current_context.get(f, 0.0)) - float(hist_row.get(f, 0.0))) ** 2
+            distances.append((d, idx))
+        distances.sort(key=lambda x: x[0])
+        return [idx for _, idx in distances[:n_neighbors]]
 
 
 def _continuation_rate(series: pd.Series, horizon: int = 3) -> float:
@@ -162,4 +189,31 @@ def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
         "near_liquidity_freq": float((states[["distance_to_nearest_buy_liquidity", "distance_to_nearest_sell_liquidity"]].min(axis=1) < 1.0).mean()),
     }
 
-    return LearnedBehavior(tm, session_profiles, sweep_stats, fvg.stats(total_bars=len(states)), volatility_stats, cond_returns, cond_ranges, cond_wicks, market_profile, states)
+    context_features = [
+        "realized_vol",
+        "distance_to_nearest_buy_liquidity",
+        "distance_to_nearest_sell_liquidity",
+        "compression_score",
+        "expansion_score",
+        "recent_sweep_strength",
+        "log_return",
+    ]
+    historical_contexts = states[context_features + ["state"]].copy().reset_index(drop=True)
+    context_index: Dict[str, list[int]] = {}
+    for state in historical_contexts["state"].unique():
+        context_index[str(state)] = historical_contexts[historical_contexts["state"] == state].index.tolist()
+
+    return LearnedBehavior(
+        tm,
+        session_profiles,
+        sweep_stats,
+        fvg.stats(total_bars=len(states)),
+        volatility_stats,
+        cond_returns,
+        cond_ranges,
+        cond_wicks,
+        market_profile,
+        historical_contexts,
+        context_index,
+        states,
+    )

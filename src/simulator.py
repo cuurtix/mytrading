@@ -25,10 +25,27 @@ class SyntheticMarketSimulator:
         self.timeframe_seconds = timeframe_seconds
 
     def _direction_and_amplitude(self, key3: tuple[str, str, str], state: str, ctx: pd.Series, rng: np.random.Generator) -> tuple[int, float]:
-        rstats = self.learned.conditional_returns.get(key3, {"mu": 0.0, "sigma": self.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
-        sampled = rng.normal(rstats["mu"], rstats["sigma"])
-        direction = 1 if sampled >= 0 else -1
-        amplitude = abs(sampled)
+        current_context = {
+            "realized_vol": float(ctx.get("realized_vol", 0.0)),
+            "distance_to_nearest_buy_liquidity": float(ctx.get("distance_to_nearest_buy_liquidity", 3.0)),
+            "distance_to_nearest_sell_liquidity": float(ctx.get("distance_to_nearest_sell_liquidity", 3.0)),
+            "compression_score": float(ctx.get("compression_score", 1.0)),
+            "expansion_score": float(ctx.get("expansion_score", 1.0)),
+            "recent_sweep_strength": float(ctx.get("recent_sweep_strength", 0.0)),
+        }
+        similar_indices = self.learned.find_similar_contexts(current_context, state, n_neighbors=15)
+        cont3 = 0.5
+        if similar_indices:
+            chosen_idx = int(rng.choice(similar_indices))
+            historical_return = float(self.learned.historical_contexts.iloc[chosen_idx]["log_return"])
+            direction = 1 if historical_return >= 0 else -1
+            amplitude = abs(historical_return) * abs(float(rng.normal(1.0, 0.1)))
+        else:
+            rstats = self.learned.conditional_returns.get(key3, {"mu": 0.0, "sigma": self.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
+            sampled = rng.normal(rstats["mu"], rstats["sigma"])
+            direction = 1 if sampled >= 0 else -1
+            amplitude = abs(sampled)
+            cont3 = float(rstats.get("cont_3", 0.5))
 
         if ctx.get("recent_sweep_flag", 0) == 1:
             cont = self.learned.sweep_stats.get("continuation_after_sweep_buy", 0.5) if ctx.get("recent_sweep_side", 0) == 1 else self.learned.sweep_stats.get("continuation_after_sweep_sell", 0.5)
@@ -37,7 +54,7 @@ class SyntheticMarketSimulator:
             amplitude *= 1.0 + min(1.0, float(ctx.get("recent_sweep_strength", 0.0)) * 8)
 
         if state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN"}:
-            amplitude *= min(1.8, 1.0 + rstats.get("cont_3", 0.5))
+            amplitude *= min(1.8, 1.0 + cont3)
         if state in {"BREAKOUT_REJECTED", "POST_SWEEP_REVERSAL"}:
             direction *= -1
             amplitude *= 0.8

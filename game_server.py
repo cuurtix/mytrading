@@ -83,7 +83,10 @@ def _initialize_runtime() -> None:
         scan_ms = int((time.perf_counter() - t_scan0) * 1000)
         _set_state(phase="learn_behavior", files_detected=files_detected)
         if not report.datasets:
-            raise ValueError("No valid dataset found under data/")
+            raise ValueError(f"Aucun dataset valide trouvé dans {DATA_ROOT}. Vérifiez la présence de CSV/Excel OHLC.")
+        total_rows = sum(len(ds.dataframe) for ds in report.datasets)
+        if total_rows < 100:
+            raise ValueError(f"Données insuffisantes: {total_rows} lignes trouvées (minimum 100)")
         t_learn0 = time.perf_counter()
         bundle = learn_from_report(report, cfg=INGEST_CFG)
         learn_ms = int((time.perf_counter() - t_learn0) * 1000)
@@ -93,7 +96,7 @@ def _initialize_runtime() -> None:
         learn_ms = None
         bundle = _fallback_bundle()
         used_fallback = True
-        _set_state(error=f"Primary calibration failed, fallback used: {exc}")
+        _set_state(error=f"Échec chargement données: {exc}. Utilisation fallback synthétique.")
 
     with state_lock:
         cached_bundle = bundle

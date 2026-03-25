@@ -227,6 +227,35 @@ class TradingGameEngine:
         self._push_event(f"WITHDRAW {amount:.2f}")
         return {"ok": True, "snapshot": self.snapshot()}
 
+    def _direction_and_amplitude_contextual(self, key3: tuple[str, str, str], state: str, ctx: pd.Series) -> tuple[int, float]:
+        current_context = {
+            "realized_vol": float(ctx.get("realized_vol", 0.0)),
+            "distance_to_nearest_buy_liquidity": float(ctx.get("distance_to_nearest_buy_liquidity", 3.0)),
+            "distance_to_nearest_sell_liquidity": float(ctx.get("distance_to_nearest_sell_liquidity", 3.0)),
+            "compression_score": float(ctx.get("compression_score", 1.0)),
+            "expansion_score": float(ctx.get("expansion_score", 1.0)),
+            "recent_sweep_strength": float(ctx.get("recent_sweep_strength", 0.0)),
+        }
+        similar = self.bundle.learned.find_similar_contexts(current_context, state, n_neighbors=15)
+        if similar:
+            idx = int(self.rng.choice(similar))
+            hist_ret = float(self.bundle.learned.historical_contexts.iloc[idx]["log_return"])
+            direction = 1 if hist_ret >= 0 else -1
+            amplitude = abs(hist_ret) * abs(float(self.rng.normal(1.0, 0.1)))
+            cont3 = 0.5
+        else:
+            rstats = self.bundle.learned.conditional_returns.get(key3, {"mu": 0.0, "sigma": self.bundle.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
+            sampled = float(self.rng.normal(rstats["mu"], rstats["sigma"]))
+            direction = 1 if sampled >= 0 else -1
+            amplitude = abs(sampled)
+            cont3 = float(rstats.get("cont_3", 0.5))
+
+        if state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN", "HIGH_VOLATILITY_PANIC"}:
+            amplitude *= min(1.9, 1.0 + cont3)
+        if state == "LOW_VOLATILITY_COMPRESSION":
+            amplitude *= 0.6
+        return int(direction), max(1e-7, float(amplitude))
+
     # -------- market loop --------
     def step_market(self) -> Dict[str, object]:
         feat = add_market_features(self.history.tail(300).copy())
@@ -239,17 +268,10 @@ class TradingGameEngine:
             session = "ASIA"
 
         key = (next_state, vol_bucket, session)
-        rstats = self.bundle.learned.conditional_returns.get(key, {"mu": 0.0, "sigma": self.bundle.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
         range_stats = self.bundle.learned.conditional_ranges.get(key, {"mu": self.bundle.learned.volatility_stats["range_mean"], "sigma": self.bundle.learned.volatility_stats["range_mean"] * 0.3})
         wstats = self.bundle.learned.conditional_wicks.get(key, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08})
 
-        sampled = self.rng.normal(rstats["mu"], rstats["sigma"])
-        direction = 1 if sampled >= 0 else -1
-        amplitude = abs(sampled)
-        if next_state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN", "HIGH_VOLATILITY_PANIC"}:
-            amplitude *= min(1.9, 1.0 + rstats.get("cont_3", 0.5))
-        if next_state == "LOW_VOLATILITY_COMPRESSION":
-            amplitude *= 0.6
+        direction, amplitude = self._direction_and_amplitude_contextual(key, next_state, ref)
 
         amplitude += abs(self.pending_player_impact)
         direction = np.sign(direction + np.sign(self.pending_player_impact) * min(1.0, abs(self.pending_player_impact) * 50)) or direction
