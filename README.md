@@ -107,6 +107,12 @@ Les endpoints API renvoient un snapshot complet après chaque action (metrics, p
 
 Le frontend affiche un état intermédiaire pendant le chargement et expose un panneau debug (fichiers détectés, fallback, timeframe, temps d’init, erreurs).
 
+La couche ingestion applique des garde-fous configurables (`IngestionConfig`) :
+- `max_files`
+- `max_total_rows`
+- `max_rows_per_dataset`
+- `selection_strategy`
+
 ## Détail de la référence macro or (garde-fou)
 
 - Référence configurable: `GLOBAL_GOLD_REFERENCE_DAILY_NOTIONAL = 3.27e11` (USD/jour, ordre de grandeur global).

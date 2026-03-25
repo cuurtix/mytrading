@@ -8,7 +8,7 @@ from typing import Any, Dict
 import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
-from src.data_ingestion import IngestionReport, NormalizedDataset, scan_data_sources
+from src.data_ingestion import IngestionConfig, IngestionReport, NormalizedDataset, scan_data_sources
 from src.data_learning import CalibrationBundle, learn_from_report
 from src.game_engine import TradingGameEngine
 
@@ -29,10 +29,16 @@ server_state: Dict[str, Any] = {
     "datasets_retained": 0,
     "rows_merged": 0,
     "timeframe": "unknown",
+    "scan_time_ms": None,
+    "learn_time_ms": None,
+    "retained_files": [],
+    "ignored_files": [],
+    "ingestion_logs_tail": [],
 }
 
 engine: TradingGameEngine | None = None
 cached_bundle: CalibrationBundle | None = None
+INGEST_CFG = IngestionConfig(max_files=96, max_total_rows=300_000, max_rows_per_dataset=80_000, selection_strategy="balanced")
 
 
 def _count_supported_files(root: Path) -> int:
@@ -70,14 +76,21 @@ def _initialize_runtime() -> None:
     start = time.perf_counter()
     _set_state(status="loading", phase="scan_data", error=None)
     files_detected = _count_supported_files(DATA_ROOT)
+    report = IngestionReport()
     try:
-        report = scan_data_sources(str(DATA_ROOT))
+        t_scan0 = time.perf_counter()
+        report = scan_data_sources(str(DATA_ROOT), cfg=INGEST_CFG)
+        scan_ms = int((time.perf_counter() - t_scan0) * 1000)
         _set_state(phase="learn_behavior", files_detected=files_detected)
         if not report.datasets:
             raise ValueError("No valid dataset found under data/")
-        bundle = learn_from_report(report)
+        t_learn0 = time.perf_counter()
+        bundle = learn_from_report(report, cfg=INGEST_CFG)
+        learn_ms = int((time.perf_counter() - t_learn0) * 1000)
         used_fallback = False
     except Exception as exc:
+        scan_ms = None
+        learn_ms = None
         bundle = _fallback_bundle()
         used_fallback = True
         _set_state(error=f"Primary calibration failed, fallback used: {exc}")
@@ -91,9 +104,14 @@ def _initialize_runtime() -> None:
                 "phase": "ready",
                 "fallback_used": used_fallback,
                 "load_time_ms": int((time.perf_counter() - start) * 1000),
-                "datasets_retained": int(len(bundle.learned.feature_df)),
+                "datasets_retained": int(len(report.datasets)) if not used_fallback else 1,
                 "rows_merged": int(len(bundle.merged_df)),
                 "timeframe": bundle.timeframe_label,
+                "scan_time_ms": scan_ms,
+                "learn_time_ms": learn_ms,
+                "retained_files": list(getattr(report, "retained_files", [])) if not used_fallback else [],
+                "ignored_files": list(getattr(report, "ignored_files", []))[:80] if not used_fallback else [],
+                "ingestion_logs_tail": list(getattr(report, "logs", []))[-80:] if not used_fallback else ["fallback used"],
             }
         )
 
@@ -118,6 +136,11 @@ def _debug_payload() -> Dict[str, Any]:
             "timeframe": server_state["timeframe"],
             "fallback_used": server_state["fallback_used"],
             "load_time_ms": server_state["load_time_ms"],
+            "scan_time_ms": server_state["scan_time_ms"],
+            "learn_time_ms": server_state["learn_time_ms"],
+            "retained_files": server_state["retained_files"],
+            "ignored_files": server_state["ignored_files"],
+            "ingestion_logs_tail": server_state["ingestion_logs_tail"],
             "error": server_state["error"],
         }
 

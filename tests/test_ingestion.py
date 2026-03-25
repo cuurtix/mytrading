@@ -6,7 +6,7 @@ import zipfile
 
 import pandas as pd
 
-from src.data_ingestion import detect_timeframe_seconds, read_zip_datasets, sanitize_ohlc
+from src.data_ingestion import IngestionConfig, detect_timeframe_seconds, read_zip_datasets, sanitize_ohlc, scan_data_sources
 
 
 @pytest.mark.skipif(__import__("importlib").util.find_spec("openpyxl") is None, reason="openpyxl non installé")
@@ -75,3 +75,29 @@ def test_ohlc_sanitation():
     assert removed == 1
     assert clean["datetime"].is_monotonic_increasing
     assert clean["datetime"].nunique() == len(clean)
+
+
+def test_scan_recursive_and_limits(tmp_path: Path):
+    root = tmp_path / "data" / "imports" / "nested"
+    root.mkdir(parents=True)
+    df = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2025-01-01", periods=20, freq="1min", tz="UTC"),
+            "open": [100 + i for i in range(20)],
+            "high": [101 + i for i in range(20)],
+            "low": [99 + i for i in range(20)],
+            "close": [100.5 + i for i in range(20)],
+            "volume": [1000 + i for i in range(20)],
+        }
+    )
+    (root / "a.csv").write_text(df.to_csv(index=False))
+    (root / "b.csv").write_text(df.to_csv(index=False))
+    (root / "note.txt").write_text("ignore me")
+
+    report = scan_data_sources(tmp_path / "data", cfg=IngestionConfig(max_files=1, max_rows_per_dataset=10))
+    assert report.root_scanned.endswith("data")
+    assert report.total_files_found >= 3
+    assert report.supported_files_found >= 2
+    assert len(report.retained_files) == 1
+    assert len(report.datasets) == 1
+    assert len(report.datasets[0].dataframe) == 10

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 import difflib
 import zipfile
 
@@ -17,6 +17,15 @@ LOW_ALIASES = {"low", "l"}
 CLOSE_ALIASES = {"close", "c"}
 VOLUME_ALIASES = {"volume", "basevolume", "tick_volume", "real_volume", "quotevolume", "usdtvolume"}
 VOLUME_PRIORITY = ["volume", "basevolume", "quotevolume", "usdtvolume", "tick_volume", "real_volume"]
+SUPPORTED_EXTS = {".zip", ".csv", ".xlsx", ".xls"}
+
+
+@dataclass(frozen=True)
+class IngestionConfig:
+    max_files: int = 64
+    max_total_rows: int = 300_000
+    max_rows_per_dataset: int = 80_000
+    selection_strategy: str = "balanced"  # balanced | most_recent | largest
 
 
 @dataclass
@@ -34,6 +43,11 @@ class NormalizedDataset:
 class IngestionReport:
     datasets: List[NormalizedDataset] = field(default_factory=list)
     logs: List[str] = field(default_factory=list)
+    root_scanned: str = ""
+    total_files_found: int = 0
+    supported_files_found: int = 0
+    retained_files: List[str] = field(default_factory=list)
+    ignored_files: List[Dict[str, str]] = field(default_factory=list)
 
     def log(self, message: str) -> None:
         self.logs.append(message)
@@ -46,8 +60,7 @@ def _normalize_col(name: str) -> str:
 def _best_match(col: str, aliases: set[str]) -> bool:
     if col in aliases:
         return True
-    matches = difflib.get_close_matches(col, list(aliases), n=1, cutoff=0.8)
-    return bool(matches)
+    return bool(difflib.get_close_matches(col, list(aliases), n=1, cutoff=0.8))
 
 
 def _map_columns(df: pd.DataFrame) -> Dict[str, str]:
@@ -65,7 +78,6 @@ def _map_columns(df: pd.DataFrame) -> Dict[str, str]:
     h = pick(HIGH_ALIASES)
     l = pick(LOW_ALIASES)
     c = pick(CLOSE_ALIASES)
-
     if not all([ts, o, h, l, c]):
         raise ValueError("Colonnes OHLC/timestamp introuvables après mapping robuste")
 
@@ -80,16 +92,12 @@ def _map_columns(df: pd.DataFrame) -> Dict[str, str]:
         "low": normalized[l],
         "close": normalized[c],
     }
-
     for vol in volumes:
         mapping[vol] = normalized[vol]
 
-    primary = next((v for v in VOLUME_PRIORITY if v in mapping), None)
-    if primary is None and volumes:
-        primary = volumes[0]
+    primary = next((v for v in VOLUME_PRIORITY if v in mapping), volumes[0] if volumes else None)
     if primary is not None:
         mapping["volume"] = mapping[primary]
-
     return mapping
 
 
@@ -128,7 +136,6 @@ def sanitize_ohlc(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     essential = ["datetime", "open", "high", "low", "close", "volume"]
     before = len(df)
     df = df.dropna(subset=essential).copy()
-
     valid = (
         (df["high"] >= df[["open", "close", "low"]].max(axis=1))
         & (df["low"] <= df[["open", "close", "high"]].min(axis=1))
@@ -136,45 +143,44 @@ def sanitize_ohlc(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     )
     df = df.loc[valid].copy()
     df = df.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last").reset_index(drop=True)
-    removed = before - len(df)
-    return df, removed
+    return df, before - len(df)
 
 
-def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | None, source_type: str, report: IngestionReport | None = None) -> NormalizedDataset:
+def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | None, source_type: str, report: IngestionReport | None = None, cfg: IngestionConfig | None = None) -> NormalizedDataset:
+    cfg = cfg or IngestionConfig()
     mapping = _map_columns(df)
     if report:
-        report.log(f"colonnes mappées [{source_name}{'::'+sheet_name if sheet_name else ''}]: {mapping}")
+        report.log(f"[PARSE] mapped columns {source_name}{'::'+sheet_name if sheet_name else ''}: {mapping}")
 
     out = pd.DataFrame()
     out["datetime"], ts_kind = _parse_timestamp(df[mapping["timestamp"]])
     if report:
-        report.log(f"timestamp détecté comme {ts_kind} [{source_name}{'::'+sheet_name if sheet_name else ''}]")
+        report.log(f"[PARSE] timestamp mode={ts_kind} source={source_name}{'::'+sheet_name if sheet_name else ''}")
 
     for col in ["open", "high", "low", "close", "volume"]:
         out[col] = pd.to_numeric(df[mapping[col]], errors="coerce")
 
-    for vcol in ["basevolume", "quotevolume", "usdtvolume", "tick_volume", "real_volume"]:
-        if vcol in mapping:
-            out[vcol] = pd.to_numeric(df[mapping[vcol]], errors="coerce")
-
     out, removed = sanitize_ohlc(out)
+    if len(out) > cfg.max_rows_per_dataset:
+        out = out.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
     timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
     if report:
-        report.log(f"timeframe détecté: {timeframe_label} ({timeframe_seconds}s) [{source_name}{'::'+sheet_name if sheet_name else ''}]")
-        report.log(f"lignes invalides supprimées: {removed} [{source_name}{'::'+sheet_name if sheet_name else ''}]")
+        report.log(f"[PARSE] timeframe={timeframe_label} ({timeframe_seconds}s) source={source_name}{'::'+sheet_name if sheet_name else ''}")
+        report.log(f"[PARSE] invalid rows removed={removed} source={source_name}{'::'+sheet_name if sheet_name else ''}")
 
     return NormalizedDataset(source_name, source_type, sheet_name, timeframe_seconds, timeframe_label, {k: str(v) for k, v in mapping.items()}, out)
 
 
-def read_excel_dataset(file_or_bytes: str | Path | bytes, source_name: str, sheet_name: str, report: IngestionReport | None = None) -> NormalizedDataset:
+def read_excel_dataset(file_or_bytes: str | Path | bytes, source_name: str, sheet_name: str, report: IngestionReport | None = None, cfg: IngestionConfig | None = None) -> NormalizedDataset:
     io_obj = BytesIO(file_or_bytes) if isinstance(file_or_bytes, bytes) else file_or_bytes
     raw = _detect_header_and_read_excel(io_obj, sheet_name)
-    return _normalize_dataframe(raw, source_name=source_name, sheet_name=sheet_name, source_type="excel", report=report)
+    return _normalize_dataframe(raw, source_name=source_name, sheet_name=sheet_name, source_type="excel", report=report, cfg=cfg)
 
 
-def read_zip_datasets(zip_path: str | Path) -> IngestionReport:
+def read_zip_datasets(zip_path: str | Path, cfg: IngestionConfig | None = None) -> IngestionReport:
+    cfg = cfg or IngestionConfig()
     report = IngestionReport()
-    report.log(f"zip trouvé: {zip_path}")
+    report.log(f"[ZIP] opened: {zip_path}")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
@@ -182,70 +188,98 @@ def read_zip_datasets(zip_path: str | Path) -> IngestionReport:
                 continue
             lower = info.filename.lower()
             if not (lower.endswith(".xlsx") or lower.endswith(".xls") or lower.endswith(".csv")):
-                report.log(f"ignoré (format non supporté): {info.filename}")
+                report.log(f"[ZIP] ignored inner file: {info.filename} reason=unsupported")
                 continue
 
             data = zf.read(info.filename)
-            report.log(f"fichier trouvé dans zip: {info.filename}")
+            report.log(f"[ZIP] inner file read: {info.filename}")
             if lower.endswith(".csv"):
                 try:
                     raw = pd.read_csv(BytesIO(data))
-                    ds = _normalize_dataframe(raw, source_name=info.filename, sheet_name=None, source_type="zip_csv", report=report)
+                    ds = _normalize_dataframe(raw, source_name=info.filename, sheet_name=None, source_type="zip_csv", report=report, cfg=cfg)
                     report.datasets.append(ds)
-                    report.log(f"dataset normalisé: {info.filename}")
                 except Exception as exc:
-                    report.log(f"échec lecture csv {info.filename}: {exc}")
+                    report.log(f"[ZIP] csv parse failed {info.filename}: {exc}")
                 continue
 
             try:
                 xls = pd.ExcelFile(BytesIO(data))
-                report.log(f"workbook ouvert: {info.filename}")
                 for sheet in xls.sheet_names:
                     try:
-                        report.log(f"feuille lue: {info.filename}::{sheet}")
-                        ds = read_excel_dataset(data, source_name=info.filename, sheet_name=sheet, report=report)
+                        report.log(f"[ZIP] sheet read: {info.filename}::{sheet}")
+                        ds = read_excel_dataset(data, source_name=info.filename, sheet_name=sheet, report=report, cfg=cfg)
                         report.datasets.append(ds)
-                        report.log(f"dataset normalisé: {info.filename}::{sheet}")
                     except Exception as exc:
-                        report.log(f"feuille ignorée {info.filename}::{sheet}: {exc}")
+                        report.log(f"[ZIP] sheet ignored {info.filename}::{sheet}: {exc}")
             except Exception as exc:
-                report.log(f"échec workbook {info.filename}: {exc}")
-
+                report.log(f"[ZIP] workbook failed {info.filename}: {exc}")
     return report
 
 
-def scan_data_sources(root_path: str | Path) -> IngestionReport:
-    root = Path(root_path)
-    report = IngestionReport()
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        lower = path.name.lower()
+def _ordered_supported_files(root: Path, strategy: str) -> List[Path]:
+    files = [p for p in root.rglob("*") if p.is_file()]
+    if strategy == "most_recent":
+        return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+    if strategy == "largest":
+        return sorted(files, key=lambda p: p.stat().st_size, reverse=True)
+    # balanced
+    return sorted(files, key=lambda p: (p.stat().st_mtime, p.stat().st_size), reverse=True)
+
+
+def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None) -> IngestionReport:
+    cfg = cfg or IngestionConfig()
+    root = Path(root_path).expanduser().resolve()
+    report = IngestionReport(root_scanned=str(root))
+    report.log(f"[SCAN] root={root}")
+
+    if not root.exists():
+        report.log("[SCAN] root missing")
+        return report
+
+    all_files = _ordered_supported_files(root, cfg.selection_strategy)
+    report.total_files_found = len(all_files)
+    supported_files = [p for p in all_files if p.suffix.lower() in SUPPORTED_EXTS]
+    report.supported_files_found = len(supported_files)
+    report.log(f"[SCAN] total files found={report.total_files_found}")
+    report.log(f"[SCAN] supported files found={report.supported_files_found}")
+
+    for p in all_files:
+        if p.suffix.lower() not in SUPPORTED_EXTS:
+            report.ignored_files.append({"path": str(p), "reason": "unsupported extension"})
+
+    selected = supported_files[: cfg.max_files]
+    for p in supported_files[cfg.max_files :]:
+        report.ignored_files.append({"path": str(p), "reason": f"max_files limit={cfg.max_files}"})
+
+    for path in selected:
+        report.log(f"[SCAN] supported file retained: {path}")
+        report.retained_files.append(str(path))
+        lower = path.suffix.lower()
         try:
-            if lower.endswith(".zip"):
-                zip_report = read_zip_datasets(path)
+            if lower == ".zip":
+                zip_report = read_zip_datasets(path, cfg=cfg)
                 report.datasets.extend(zip_report.datasets)
                 report.logs.extend(zip_report.logs)
-            elif lower.endswith(".csv"):
+            elif lower == ".csv":
                 raw = pd.read_csv(path)
-                ds = _normalize_dataframe(raw, source_name=str(path), sheet_name=None, source_type="csv", report=report)
+                ds = _normalize_dataframe(raw, source_name=str(path), sheet_name=None, source_type="csv", report=report, cfg=cfg)
                 report.datasets.append(ds)
-                report.log(f"dataset normalisé: {path}")
-            elif lower.endswith(".xlsx") or lower.endswith(".xls"):
+            elif lower in {".xlsx", ".xls"}:
                 xls = pd.ExcelFile(path)
-                report.log(f"workbook ouvert: {path}")
+                report.log(f"[PARSE] workbook opened: {path}")
                 for sheet in xls.sheet_names:
-                    report.log(f"feuille lue: {path}::{sheet}")
-                    ds = read_excel_dataset(path, source_name=str(path), sheet_name=sheet, report=report)
+                    report.log(f"[PARSE] sheet read: {path}::{sheet}")
+                    ds = read_excel_dataset(path, source_name=str(path), sheet_name=sheet, report=report, cfg=cfg)
                     report.datasets.append(ds)
-                    report.log(f"dataset normalisé: {path}::{sheet}")
         except Exception as exc:
-            report.log(f"source ignorée {path}: {exc}")
+            report.ignored_files.append({"path": str(path), "reason": str(exc)})
+            report.log(f"[SCAN] ignored file: {path} reason={exc}")
 
+    report.log(f"[SCAN] datasets normalized={len(report.datasets)}")
     return report
 
 
-def merge_compatible_datasets(datasets: List[NormalizedDataset], report: IngestionReport | None = None, mode: str = "balanced") -> pd.DataFrame:
+def merge_compatible_datasets(datasets: List[NormalizedDataset], report: IngestionReport | None = None, mode: str = "balanced", max_total_rows: int | None = None) -> pd.DataFrame:
     if not datasets:
         return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
@@ -260,20 +294,23 @@ def merge_compatible_datasets(datasets: List[NormalizedDataset], report: Ingesti
             return float(len(ds))
         if mode == "row_count":
             return float(rows)
-        # balanced: nombre de datasets + volume d'information
         return float(len(ds) + rows / 10_000.0)
 
     target_tf = max(grouped, key=score)
     selected = grouped[target_tf]
 
     if report:
-        report.log(f"fusion mode={mode}: timeframe cible {target_tf}s avec {len(selected)} datasets")
+        report.log(f"[LEARN] datasets retained for merge={len(selected)} target_tf={target_tf}")
         for tf, ds_list in grouped.items():
             if tf != target_tf:
-                report.log(f"dataset ignoré pour fusion (timeframe incompatible {tf}s): {len(ds_list)}")
+                report.log(f"[LEARN] timeframe ignored tf={tf} count={len(ds_list)}")
 
     merged = pd.concat([d.dataframe.assign(source=d.name, sheet=d.sheet_name) for d in selected], ignore_index=True)
     merged = merged.sort_values("datetime").drop_duplicates(subset=["datetime"], keep="last")
+    if max_total_rows and len(merged) > max_total_rows:
+        merged = merged.tail(max_total_rows)
+        if report:
+            report.log(f"[LEARN] merged rows clipped to {max_total_rows}")
     if report:
-        report.log(f"dataset fusionné: {len(merged)} lignes")
+        report.log(f"[LEARN] merged rows={len(merged)}")
     return merged.reset_index(drop=True)

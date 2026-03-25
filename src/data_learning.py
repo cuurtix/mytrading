@@ -6,7 +6,7 @@ from typing import Dict, List
 import pandas as pd
 
 from src.behavior_learning import LearnedBehavior, learn_behavior
-from src.data_ingestion import IngestionReport, detect_timeframe_seconds, merge_compatible_datasets, scan_data_sources
+from src.data_ingestion import IngestionConfig, IngestionReport, detect_timeframe_seconds, merge_compatible_datasets, scan_data_sources
 
 
 @dataclass
@@ -18,11 +18,12 @@ class CalibrationBundle:
     timeframe_label: str
 
 
-def learn_from_report(report: IngestionReport) -> CalibrationBundle:
+def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = None) -> CalibrationBundle:
+    cfg = cfg or IngestionConfig()
     if not report.datasets:
         raise ValueError("Aucun dataset exploitable")
 
-    merged = merge_compatible_datasets(report.datasets, report=report)
+    merged = merge_compatible_datasets(report.datasets, report=report, mode=cfg.selection_strategy, max_total_rows=cfg.max_total_rows)
     if merged.empty:
         raise ValueError("Aucun dataset compatible (timeframe)")
 
@@ -42,9 +43,10 @@ def learn_from_report(report: IngestionReport) -> CalibrationBundle:
     )
 
 
-def learn_from_root(root_path: str) -> CalibrationBundle:
-    report = scan_data_sources(root_path)
-    return learn_from_report(report)
+def learn_from_root(root_path: str, cfg: IngestionConfig | None = None) -> CalibrationBundle:
+    cfg = cfg or IngestionConfig()
+    report = scan_data_sources(root_path, cfg=cfg)
+    return learn_from_report(report, cfg=cfg)
 
 
 def bundle_summary(bundle: CalibrationBundle) -> Dict[str, float]:

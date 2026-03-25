@@ -25,6 +25,7 @@ class LearnedBehavior:
     conditional_returns: Dict[Key3, Dict[str, float]]
     conditional_ranges: Dict[Key3, Dict[str, float]]
     conditional_wicks: Dict[Key3, Dict[str, float]]
+    market_profile: Dict[str, float]
     feature_df: pd.DataFrame
 
 
@@ -150,4 +151,15 @@ def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
         "wick_lower_mean": float(states["wick_lower"].mean()),
     }
 
-    return LearnedBehavior(tm, session_profiles, sweep_stats, fvg.stats(total_bars=len(states)), volatility_stats, cond_returns, cond_ranges, cond_wicks, states)
+    market_profile = {
+        "expansion_freq": float((states["expansion_score"] > 1.25).mean()),
+        "compression_freq": float((states["compression_score"] > states["compression_score"].quantile(0.7)).mean()),
+        "breakout_accepted_freq": float(((states["breakout_up"]) | (states["breakout_down"])).mean()),
+        "breakout_rejected_freq": float(states["breakout_rejected"].mean()),
+        "equal_high_freq": float(states["equal_high"].mean()),
+        "equal_low_freq": float(states["equal_low"].mean()),
+        "near_fvg_freq": float((states["distance_to_nearest_open_fvg"] < 1.25).mean()),
+        "near_liquidity_freq": float((states[["distance_to_nearest_buy_liquidity", "distance_to_nearest_sell_liquidity"]].min(axis=1) < 1.0).mean()),
+    }
+
+    return LearnedBehavior(tm, session_profiles, sweep_stats, fvg.stats(total_bars=len(states)), volatility_stats, cond_returns, cond_ranges, cond_wicks, market_profile, states)
