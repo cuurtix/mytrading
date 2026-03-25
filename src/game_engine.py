@@ -15,7 +15,6 @@ from src.liquidity_map import LiquidityMap
 from src.logic_monitor import VALID_SESSIONS, validate_ohlc, validate_snapshot
 from src.model_config import ModelConfig
 from src.sessions import xauusd_session_name
-from src.state_engine import sample_next_state
 
 
 @dataclass
@@ -66,6 +65,15 @@ class TradingGameEngine:
         self.last_sweep = False
         self.order_blocks: list[dict[str, float]] = []
         self.current_intention = "MOVE_TO_TARGET"
+        self.avg_range = float(max(0.05, bundle.learned.volatility_stats.get("range_mean", 0.2)))
+        self.volatility = float(max(1e-6, bundle.learned.volatility_stats.get("log_return_sigma", 1e-4)))
+        self.fair_price = float(self.reference_df["close"].tail(100).mean())
+        self.intent_state = {
+            "phase": "ACCUMULATION",
+            "target": None,
+            "last_sweep": False,
+            "direction": 0,
+        }
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -293,12 +301,25 @@ class TradingGameEngine:
 
     def decide_intention(self, price: float, threshold: float) -> str:
         target = self.compute_target(price)
-        distance = abs(target - price)
-        if distance > threshold:
-            return "MOVE_TO_TARGET"
-        if not self.last_sweep:
+        self.intent_state["target"] = float(target)
+        dist = abs(target - price)
+        phase = self.intent_state["phase"]
+
+        if phase == "ACCUMULATION":
+            if dist > threshold:
+                return "MOVE_TO_LIQUIDITY"
+            self.intent_state["phase"] = "MANIPULATION"
             return "SWEEP"
-        return "EXPANSION"
+
+        if phase == "MANIPULATION":
+            if not self.intent_state["last_sweep"]:
+                return "SWEEP"
+            self.intent_state["phase"] = "EXPANSION"
+            return "EXPANSION"
+
+        if phase == "EXPANSION":
+            return "TREND"
+        return "RANGE"
 
     def _random_spike(self, sigma: float) -> float:
         direction = -1.0 if self.market_structure.get("trend") == "bullish" else 1.0
@@ -307,22 +328,53 @@ class TradingGameEngine:
     def _strong_move(self, sigma: float) -> float:
         return float(max(0.15, sigma * 16.0) * self.rng.uniform(0.9, 1.6))
 
+    def execute_sweep(self, price: float, target: float) -> float:
+        spike = (target - price) * float(self.rng.uniform(1.2, 1.8))
+        new_price = price + spike
+        self.intent_state["last_sweep"] = True
+        self.last_sweep = True
+        self.intent_state["direction"] = -1 if target > price else 1
+        return float(new_price)
+
+    def expansion_move(self, price: float) -> float:
+        direction = int(self.intent_state.get("direction", 0) or (1 if self.market_structure.get("trend") != "bearish" else -1))
+        move = direction * float(self.rng.uniform(self.avg_range * 0.5, self.avg_range * 2.0))
+        return float(price + move)
+
+    def move_to_liquidity(self, price: float, target: float) -> float:
+        return float(price + (target - price) * 0.1)
+
+    def range_move(self, price: float) -> float:
+        return float(price + self.rng.normal(0, self.avg_range * 0.2))
+
+    def mean_reversion(self, price: float) -> float:
+        return (self.fair_price - price) * 0.02
+
+    def volatility_scale(self) -> float:
+        return float(np.clip(self.volatility, 0.0001, 0.02))
+
     def generate_price(self, price: float, sigma: float) -> float:
         target = self.compute_target(price)
-        intention = self.decide_intention(price, threshold=max(0.2, sigma * price * 2.0))
+        intention = self.decide_intention(price, threshold=max(0.2, self.avg_range * 1.5))
         if self.amd_phase == "ACCUMULATION":
-            intention = "MOVE_TO_TARGET"
+            self.intent_state["phase"] = "ACCUMULATION"
         elif self.amd_phase == "MANIPULATION":
-            intention = "SWEEP"
+            self.intent_state["phase"] = "MANIPULATION"
         elif self.amd_phase == "EXPANSION":
-            intention = "EXPANSION"
+            self.intent_state["phase"] = "EXPANSION"
         self.current_intention = intention
-        if intention == "MOVE_TO_TARGET":
-            return float(price + (target - price) * 0.1)
-        if intention == "SWEEP":
-            return float(price + self._random_spike(sigma))
-        direction = -1.0 if self.last_sweep else 1.0
-        return float(price + direction * self._strong_move(sigma))
+        if intention == "MOVE_TO_LIQUIDITY":
+            base = self.move_to_liquidity(price, target)
+        elif intention == "SWEEP":
+            base = self.execute_sweep(price, target)
+        elif intention in {"EXPANSION", "TREND"}:
+            base = self.expansion_move(price)
+        else:
+            base = self.range_move(price)
+
+        noise = float(self.rng.normal(0, self.volatility_scale() * 0.1))
+        base += self.fvg_pull(price) + self.mean_reversion(price) + noise
+        return float(base)
 
     def _fvg_attraction(self, price: float, fvg_levels: list[dict[str, float]]) -> float:
         if not fvg_levels:
@@ -538,18 +590,14 @@ class TradingGameEngine:
     def step_market(self) -> Dict[str, object]:
         feat = add_market_features(self.history.tail(300).copy())
         ref = feat.iloc[-1]
-        next_state = sample_next_state(self.current_state, ref, self.bundle.learned.transition_model.transition_probs, self.rng)
-
-        vol_bucket = str(ref.get("vol_regime_bucket", "NORMAL"))
         session = str(ref.get("session_name", "LONDON_OPEN"))
         if session not in VALID_SESSIONS:
             session = "ASIA"
+        range_mu = self.avg_range
+        range_sigma = max(self.avg_range * 0.35, 1e-4)
+        wstats = {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08}
 
-        key = (next_state, vol_bucket, session)
-        range_stats = self.bundle.learned.conditional_ranges.get(key, {"mu": self.bundle.learned.volatility_stats["range_mean"], "sigma": self.bundle.learned.volatility_stats["range_mean"] * 0.3})
-        wstats = self.bundle.learned.conditional_wicks.get(key, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08})
-
-        sigma = float(max(1e-6, self.bundle.learned.volatility_stats["log_return_sigma"]))
+        sigma = float(self.volatility_scale())
         noise = float(self.rng.normal(0.0, sigma * 0.05))
         stochastic_return = float(self.rng.normal(0.0, sigma * 0.05))
 
@@ -606,7 +654,7 @@ class TradingGameEngine:
         direction = int(np.sign(move) or 1)
         self.pending_player_impact *= self.config.pending_impact_decay
 
-        candle_range = max(1e-8, self.rng.normal(range_stats["mu"], range_stats["sigma"]))
+        candle_range = max(1e-8, self.rng.normal(range_mu, range_sigma))
         high = max(current_price, next_close) + candle_range * max(0.0, self.rng.normal(wstats["upper_mu"], wstats["upper_sigma"]))
         low = min(current_price, next_close) - candle_range * max(0.0, self.rng.normal(wstats["lower_mu"], wstats["lower_sigma"]))
 
@@ -621,7 +669,7 @@ class TradingGameEngine:
         fvg_dist = self.fvg.nearest_open_distance(next_close)
         fvg_dist_rel = fvg_dist / max(local_scale, 1e-8) if not np.isnan(fvg_dist) else np.nan
         near_fvg = bool(not np.isnan(fvg_dist_rel) and fvg_dist_rel <= self.config.fvg_rebalance_distance_threshold)
-        if near_fvg and next_state == "REBALANCING_TO_FVG":
+        if near_fvg and self.current_intention in {"MOVE_TO_LIQUIDITY", "RANGE"}:
             next_close = max(0.01, current_price + (next_close - current_price) * self.config.fvg_rebalance_damping)
         sweep = self.lmap.detect_sweep(len(self.history), high, low, next_close)
         structural_sweep = self._detect_sweep(high, low, next_close)
@@ -634,10 +682,10 @@ class TradingGameEngine:
             elif self.market_structure["trend"] == "bearish":
                 self.market_structure["trend"] = "bullish"
 
-        # sweep/cascade conditionnelle corrélée participation/liquidité/état/vol
+        # sweep/cascade conditionnelle corrélée participation/liquidité/vol
         proximity_score = max(0.0, 1.0 - min(liq_dist["distance_to_nearest_buy_liquidity"], liq_dist["distance_to_nearest_sell_liquidity"]))
-        breakout_score = 1.0 if next_state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN"} else 0.0
-        vol_score = 1.0 if next_state == "HIGH_VOLATILITY_PANIC" else 0.4
+        breakout_score = 1.0 if self.current_intention in {"EXPANSION", "TREND"} else 0.0
+        vol_score = 1.0 if self.current_intention in {"SWEEP", "EXPANSION", "TREND"} else 0.4
         sweep_trigger_score = 0.35 * proximity_score + 0.35 * min(1.0, self.recent_order_participation * 2000) + 0.2 * breakout_score + 0.1 * vol_score
         if sweep["recent_sweep_flag"] and sweep_trigger_score > self.config.sweep_trigger_threshold:
             cascade_score = 0.5 * sweep["recent_sweep_strength"] + 0.25 * breakout_score + 0.2 * min(1.0, self.recent_order_participation * 2000) + 0.05 * vol_score
@@ -673,10 +721,11 @@ class TradingGameEngine:
         self.lmap.ingest_feature_row(len(self.history), feat_new, rolling_high=float(self.history["high"].tail(30).max()), rolling_low=float(self.history["low"].tail(30).min()))
         self.lmap.age_and_decay(len(self.history))
         tmp = pd.DataFrame([{"high": row["high"], "low": row["low"]}])
-        self.fvg.detect_new(pd.concat([self.history[["high", "low"]].tail(2), tmp], ignore_index=True), 2, state=next_state, session=session)
+        self.fvg.detect_new(pd.concat([self.history[["high", "low"]].tail(2), tmp], ignore_index=True), 2, state=self.current_intention, session=session)
         self.fvg.update_fill(len(self.history), row["high"], row["low"])
 
-        self.current_state = next_state
+        state_map = {"MOVE_TO_LIQUIDITY": "RANGE", "SWEEP": "MANIPULATION", "EXPANSION": "BREAKOUT_ACCEPTED", "TREND": "EXPANSION_UP", "RANGE": "RANGE"}
+        self.current_state = state_map.get(self.current_intention, "RANGE")
         self.update_phase(sigma=sigma, move=float(move))
 
         if self.phase == "accumulation" and abs(move) > sigma * 1.15:
@@ -690,7 +739,7 @@ class TradingGameEngine:
         return {
             "ok": True,
             "candle": row,
-            "state": next_state,
+            "state": self.current_state,
             "phase": self.phase,
             "amd_phase": self.amd_phase,
             "sweep": sweep,
