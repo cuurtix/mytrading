@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>XAUUSD Trading Game</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>XAUUSD Local Trading Game</h1>
+    <div><span id="price">-</span> | <span id="time">-</span> | <span id="mode">-</span> | <span id="status">Initialisation...</span></div>
+  </header>
+  <div id="fallbackBanner" class="fallback-banner" style="display:none;"></div>
+
+  <main>
+    <section class="panel">
+      <h2>Marché</h2>
+      <canvas id="priceChart"></canvas>
+      <div class="row">
+        <button id="btnStep">STEP</button>
+        <button id="btnRun">RUN</button>
+        <button id="btnPause">PAUSE</button>
+        <button id="recenter">RECENTER</button>
+      </div>
+      <div id="events" class="events"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Trading</h2>
+      <div class="row">
+        <input id="size" type="number" step="0.1" value="1" />
+        <input id="leverage" type="number" step="1" value="50" />
+        <button id="buy">BUY</button>
+        <button id="sell">SELL</button>
+      </div>
+      <div class="row">
+        <button id="closeAll">CLOSE ALL</button>
+        <button id="close10">CLOSE 10%</button>
+        <button id="close20">CLOSE 20%</button>
+        <button id="close50">CLOSE 50%</button>
+      </div>
+      <div class="row">
+        <input id="cashAmount" type="number" value="1000" step="100" />
+        <button id="deposit">DEPOSIT</button>
+        <button id="withdraw">WITHDRAW</button>
+        <button id="reset">RESTART / RESET TOTAL</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Portefeuille temps réel</h2>
+      <div class="portfolio-box">
+        <div class="row"><span>Balance</span><span id="balance"></span></div>
+        <div class="row"><span>Equity</span><span id="equity"></span></div>
+        <div class="row"><span>PnL</span><span id="pnl"></span></div>
+      </div>
+      <h3>Positions</h3>
+      <div id="positions"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Debug init</h2>
+      <pre id="debugInfo"></pre>
+      <div id="debugError" class="events"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
