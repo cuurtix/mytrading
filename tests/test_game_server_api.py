@@ -25,6 +25,7 @@ def _engine():
 
 def test_api_snapshot_after_actions():
     game_server.engine = _engine()
+    game_server.server_state.update({"status": "ready", "phase": "ready", "timeframe": "1m"})
     client = game_server.app.test_client()
 
     for endpoint, payload in [
@@ -44,6 +45,7 @@ def test_api_snapshot_after_actions():
 
 def test_api_init_returns_initial_candles_and_snapshot_keys():
     game_server.engine = _engine()
+    game_server.server_state.update({"status": "ready", "phase": "ready", "timeframe": "1m"})
     client = game_server.app.test_client()
     resp = client.post('/api/init', json={})
     data = resp.get_json()
@@ -59,8 +61,20 @@ def test_api_init_returns_initial_candles_and_snapshot_keys():
 def test_api_init_fallback_when_no_dataset():
     game_server.engine = None
     client = game_server.app.test_client()
-    with patch("game_server.learn_from_root", side_effect=ValueError("no data")):
+    with patch("game_server.scan_data_sources", side_effect=ValueError("no data")):
+        game_server._initialize_runtime()
         data = client.post('/api/init', json={}).get_json()
     assert data["ok"] is True
     assert data["timeframe"] == "1m"
     assert len(data["initial_candles"]) > 0
+
+
+def test_health_and_init_status_endpoints():
+    game_server.engine = _engine()
+    game_server.server_state.update({"status": "ready", "phase": "ready", "timeframe": "1m"})
+    client = game_server.app.test_client()
+    h = client.get('/api/health').get_json()
+    s = client.get('/api/init_status').get_json()
+    assert h["ok"] is True
+    assert s["ok"] is True
+    assert s["status"] == "ready"

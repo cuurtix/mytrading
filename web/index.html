@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>XAUUSD Trading Game</title>
   <link rel="stylesheet" href="/static/style.css" />
-  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <header>
@@ -16,7 +15,7 @@
   <main>
     <section class="panel">
       <h2>Marché</h2>
-      <div id="priceChart"></div>
+      <canvas id="priceChart"></canvas>
       <div class="row">
         <button id="btnStep">STEP</button>
         <button id="btnRun">RUN</button>
@@ -54,6 +53,12 @@
       <pre id="metrics"></pre>
       <h3>Positions</h3>
       <div id="positions"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Debug init</h2>
+      <pre id="debugInfo"></pre>
+      <div id="debugError" class="events"></div>
     </section>
   </main>
 

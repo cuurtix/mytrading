@@ -1,6 +1,6 @@
 body { font-family: Arial, sans-serif; margin:0; background:#0f1220; color:#e8ecff; }
 header { padding:12px 16px; background:#171b2f; display:flex; justify-content:space-between; }
-main { display:grid; grid-template-columns: 2fr 1fr 1fr; gap:12px; padding:12px; }
+main { display:grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap:12px; padding:12px; }
 .panel { background:#1b2140; padding:12px; border-radius:8px; }
 .row { display:flex; gap:8px; margin:8px 0; flex-wrap:wrap; }
 button { background:#2d5bff; border:none; color:white; padding:8px 10px; border-radius:6px; cursor:pointer; }
@@ -10,3 +10,4 @@ input { padding:6px; border-radius:4px; border:1px solid #444; background:#0f122
 pre { background:#0f1220; padding:8px; border-radius:6px; }
 #positions { font-size:13px; }
 #priceChart { width:100%; height:420px; }
+@media (max-width: 1200px) { main { grid-template-columns: 1fr; } }

@@ -13,6 +13,8 @@ Ce dépôt fournit deux couches distinctes :
 3. `web/` = interface de simulation (chart chandeliers, boutons de trading, positions, métriques, events).  
 4. `app.py` = utilitaire de calibration (facultatif), volontairement séparé du parcours joueur.
 
+La calibration est chargée en arrière-plan au boot serveur, puis réutilisée en cache pour éviter de bloquer l’UI.
+
 ## Architecture choisie
 
 - **Frontend local (principal)** : `web/index.html`, `web/style.css`, `web/app.js`
@@ -96,6 +98,14 @@ Note: CLOSE 10% / 20% / 50% applique ce pourcentage sur **chaque position ouvert
 - liquidation forcée si equity <= maintenance margin
 
 Les endpoints API renvoient un snapshot complet après chaque action (metrics, positions, last_price, state, timestamp, recent_events).
+
+## Endpoints d’état / initialisation robuste
+
+- `GET /api/health` : santé serveur + état init (`loading/ready/failed`)
+- `GET /api/init_status` : statut détaillé d’initialisation
+- `POST /api/init` : snapshot initial + `initial_candles` + bloc `debug`
+
+Le frontend affiche un état intermédiaire pendant le chargement et expose un panneau debug (fichiers détectés, fallback, timeframe, temps d’init, erreurs).
 
 ## Détail de la référence macro or (garde-fou)
 
