@@ -1,20 +1,31 @@
-# XAUUSD Local Trading Game (HTML/CSS/JS + moteur Python data-driven)
+# XAUUSD Local Trading Simulator (produit principal) + Streamlit (outil secondaire)
 
-Le projet est maintenant un **jeu local jouable** avec interface principale en **HTML/CSS/JavaScript**.
+Ce dépôt fournit deux couches distinctes :
+- **Produit principal** : simulateur de trading XAUUSD jouable en local (serveur Flask + frontend web live).
+- **Outil secondaire** : `app.py` Streamlit pour debug/calibration, non destiné à l’usage “jeu”.
 
-## Architecture choisie (Option B hybride locale)
+---
 
-- **Frontend local**: `web/index.html`, `web/style.css`, `web/app.js`
-- **Backend local Python**: `game_server.py`
-- **Moteur**: ingestion + apprentissage structurel + transitions contextuelles + simulation incrémentale
-- **Configuration moteur**: `src/model_config.py` (centralisation des paramètres impact/liquidité/cascade/FVG)
+## Architecture cible (résumé)
+
+1. `src/` = noyau moteur (ingestion, calibration, comportements, transitions, exécution portefeuille).  
+2. `game_server.py` = API locale du jeu (`/api/init`, `/api/step`, `/api/order`, ...).  
+3. `web/` = interface de simulation (chart chandeliers, boutons de trading, positions, métriques, events).  
+4. `app.py` = utilitaire de calibration (facultatif), volontairement séparé du parcours joueur.
+
+## Architecture choisie
+
+- **Frontend local (principal)** : `web/index.html`, `web/style.css`, `web/app.js`
+- **Backend local Python (principal)** : `game_server.py`
+- **Moteur** : `src/` (ingestion, calibration, génération synthétique, trading, validation logique)
+- **Configuration moteur** : `src/model_config.py` (paramètres impact/liquidité/cascade/FVG)
 
 Pourquoi cette architecture:
 - garde la puissance du moteur Python existant,
 - offre une UI jeu fluide en HTML,
 - reste simple à lancer en local.
 
-## Gameplay disponible
+## Fonctionnalités de simulation (UI web)
 
 - BUY / SELL
 - CLOSE ALL
@@ -22,6 +33,7 @@ Pourquoi cette architecture:
 - DEPOSIT / WITHDRAW
 - RESTART / RESET TOTAL
 - boucle marché vivante (STEP/RUN/PAUSE + vitesse)
+- graphique chandeliers OHLC en temps réel + bouton RECENTER
 - portefeuille temps réel (balance/equity/pnl/marge/exposition/positions)
 
 ## Moteur conservé
@@ -53,7 +65,7 @@ En pratique:
 
 La configuration associée est centralisée dans `ModelConfig` pour éviter les règles magiques dispersées.
 
-## Lancer le jeu local
+## Lancer le simulateur (commande principale)
 
 ```bash
 python -m venv .venv
@@ -64,9 +76,15 @@ python game_server.py
 
 Puis ouvrir: `http://127.0.0.1:8000`
 
-## Outil secondaire
+## Mode debug/calibration (facultatif)
 
-`app.py` (Streamlit) peut rester comme outil secondaire de debug/calibration, mais l’interface principale de jeu est HTML.
+`app.py` est conservé comme **outil secondaire** :
+
+```bash
+streamlit run app.py
+```
+
+Ce mode ne remplace pas l’application produit principale.
 
 ## Heuristiques assumées
 

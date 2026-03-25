@@ -1,13 +1,38 @@
 let running = false;
 let timer = null;
-const labels = [];
-const prices = [];
 
-const chart = new Chart(document.getElementById('priceChart'), {
-  type: 'line',
-  data: { labels, datasets: [{ label: 'XAUUSD', data: prices, borderColor: '#5eead4' }] },
-  options: { animation: false, scales: { x: { display:false } } }
+const chartContainer = document.getElementById('priceChart');
+const chart = LightweightCharts.createChart(chartContainer, {
+  layout: { background: { color: '#1b2140' }, textColor: '#e8ecff' },
+  rightPriceScale: { borderColor: '#30365a' },
+  timeScale: { borderColor: '#30365a', timeVisible: true },
+  grid: { vertLines: { color: '#252b4a' }, horzLines: { color: '#252b4a' } },
+  crosshair: { mode: 0 },
 });
+const candleSeries = chart.addCandlestickSeries({
+  upColor: '#2ecc71',
+  downColor: '#e74c3c',
+  wickUpColor: '#2ecc71',
+  wickDownColor: '#e74c3c',
+  borderVisible: false,
+});
+
+window.addEventListener('resize', () => {
+  chart.applyOptions({ width: chartContainer.clientWidth, height: 420 });
+});
+chart.applyOptions({ width: chartContainer.clientWidth, height: 420 });
+
+const candles = [];
+
+function toBar(c) {
+  return {
+    time: Math.floor(new Date(c.datetime).getTime() / 1000),
+    open: Number(c.open),
+    high: Number(c.high),
+    low: Number(c.low),
+    close: Number(c.close),
+  };
+}
 
 function logEvent(msg){
   const el = document.getElementById('events');
@@ -40,24 +65,35 @@ function refreshFromSnapshot(snap){
   }
 }
 
+function appendCandle(candle){
+  const bar = toBar(candle);
+  const last = candles[candles.length - 1];
+  if(last && last.time === bar.time){
+    candles[candles.length - 1] = bar;
+  } else {
+    candles.push(bar);
+  }
+  const trimmed = candles.slice(-400);
+  candles.length = 0;
+  candles.push(...trimmed);
+  candleSeries.setData(candles);
+}
+
 async function step(){
   const d = await api('/api/step');
   if(!d.ok) return;
-  const c = d.candle;
-  labels.push(c.datetime);
-  prices.push(c.close);
-  if(labels.length>300){labels.shift(); prices.shift();}
-  chart.update();
+  appendCandle(d.candle);
   refreshFromSnapshot(d.snapshot);
-  logEvent(`state=${d.state} close=${c.close.toFixed(2)} sweep=${d.sweep.recent_sweep_flag}`);
+  logEvent(`state=${d.state} close=${Number(d.candle.close).toFixed(2)} sweep=${d.sweep.recent_sweep_flag}`);
 }
 
 async function init(){
   const d = await api('/api/init');
   document.getElementById('status').textContent = `Prêt - timeframe ${d.timeframe}`;
-  labels.length = 0; prices.length = 0;
-  (d.initial_candles || []).forEach(c => { labels.push(c.datetime); prices.push(c.close); });
-  chart.update();
+  candles.length = 0;
+  (d.initial_candles || []).forEach(c => candles.push(toBar(c)));
+  candleSeries.setData(candles);
+  chart.timeScale().fitContent();
   refreshFromSnapshot(d.snapshot || d);
 }
 
@@ -70,6 +106,7 @@ function runLoop(){
 document.getElementById('btnStep').onclick = step;
 document.getElementById('btnRun').onclick = ()=>{ running=true; runLoop(); };
 document.getElementById('btnPause').onclick = ()=>{ running=false; if(timer) clearTimeout(timer); };
+document.getElementById('recenter').onclick = ()=> chart.timeScale().fitContent();
 
 document.getElementById('buy').onclick = async()=>{
   const size=Number(document.getElementById('size').value); const lev=Number(document.getElementById('leverage').value);
@@ -89,6 +126,6 @@ document.getElementById('close20').onclick = async()=>{ const r=await api('/api/
 document.getElementById('close50').onclick = async()=>{ const r=await api('/api/close',{fraction:0.5}); refreshFromSnapshot(r.snapshot); logEvent(`Close 50% realized=${r.realized.toFixed(2)}`); };
 document.getElementById('deposit').onclick = async()=>{ const amount=Number(document.getElementById('cashAmount').value); const r=await api('/api/deposit',{amount}); refreshFromSnapshot(r.snapshot); logEvent(`Deposit ${amount}`); };
 document.getElementById('withdraw').onclick = async()=>{ const amount=Number(document.getElementById('cashAmount').value); const r=await api('/api/withdraw',{amount}); refreshFromSnapshot(r.snapshot); logEvent(r.ok?`Withdraw ${amount}`:`Withdraw refusé (${r.reason})`); };
-document.getElementById('reset').onclick = async()=>{ const r=await api('/api/reset'); labels.length=0; prices.length=0; chart.update(); refreshFromSnapshot(r.snapshot); logEvent('RESET TOTAL'); await init(); };
+document.getElementById('reset').onclick = async()=>{ const r=await api('/api/reset'); candles.length=0; candleSeries.setData([]); refreshFromSnapshot(r.snapshot); logEvent('RESET TOTAL'); await init(); };
 
 init();

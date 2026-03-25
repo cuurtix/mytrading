@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict
 
+import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
-from src.data_learning import learn_from_root
+from src.data_ingestion import IngestionReport, NormalizedDataset
+from src.data_learning import learn_from_report, learn_from_root
 from src.game_engine import TradingGameEngine
 
 ROOT = Path(__file__).resolve().parent
@@ -17,11 +19,33 @@ app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
 engine: TradingGameEngine | None = None
 
 
+def _fallback_engine() -> TradingGameEngine:
+    dt = pd.date_range("2025-01-01", periods=1200, freq="1min", tz="UTC")
+    rng = pd.Series(range(len(dt)), dtype=float)
+    close = 2020.0 + (rng * 0.01) + pd.Series((rng % 17 - 8) * 0.03, dtype=float)
+    df = pd.DataFrame(
+        {
+            "datetime": dt,
+            "open": close.shift(1).fillna(close.iloc[0]),
+            "high": close + 0.35,
+            "low": close - 0.35,
+            "close": close,
+            "volume": 900 + (rng % 40) * 15,
+        }
+    )
+    ds = NormalizedDataset("fallback_synth", "generated", None, 60, "1m", {}, df)
+    bundle = learn_from_report(IngestionReport(datasets=[ds], logs=["fallback dataset generated in-memory"]))
+    return TradingGameEngine(bundle)
+
+
 def _ensure_engine() -> TradingGameEngine:
     global engine
     if engine is None:
-        bundle = learn_from_root(str(DATA_ROOT))
-        engine = TradingGameEngine(bundle)
+        try:
+            bundle = learn_from_root(str(DATA_ROOT))
+            engine = TradingGameEngine(bundle)
+        except Exception:
+            engine = _fallback_engine()
     return engine
 
 
@@ -33,8 +57,11 @@ def index():
 @app.post("/api/init")
 def init_game():
     global engine
-    bundle = learn_from_root(str(DATA_ROOT))
-    engine = TradingGameEngine(bundle)
+    try:
+        bundle = learn_from_root(str(DATA_ROOT))
+        engine = TradingGameEngine(bundle)
+    except Exception:
+        engine = _fallback_engine()
     snap = engine.snapshot()
     initial_candles = engine.history.tail(250).to_dict(orient="records")
     return jsonify({"ok": True, "timeframe": engine.bundle.timeframe_label, "initial_candles": initial_candles, "snapshot": snap, **snap})

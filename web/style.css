@@ -9,3 +9,4 @@ input { padding:6px; border-radius:4px; border:1px solid #444; background:#0f122
 .events { max-height:120px; overflow:auto; background:#0f1220; padding:8px; border-radius:6px; font-size:12px; }
 pre { background:#0f1220; padding:8px; border-radius:6px; }
 #positions { font-size:13px; }
+#priceChart { width:100%; height:420px; }

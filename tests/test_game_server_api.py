@@ -11,6 +11,7 @@ from src.data_learning import learn_from_report
 from src.game_engine import TradingGameEngine
 import pandas as pd
 import game_server
+from unittest.mock import patch
 
 
 def _engine():
@@ -53,3 +54,13 @@ def test_api_init_returns_initial_candles_and_snapshot_keys():
     for k in ['metrics', 'positions', 'last_price', 'state', 'timestamp', 'recent_events']:
         assert k in data
         assert k in data["snapshot"]
+
+
+def test_api_init_fallback_when_no_dataset():
+    game_server.engine = None
+    client = game_server.app.test_client()
+    with patch("game_server.learn_from_root", side_effect=ValueError("no data")):
+        data = client.post('/api/init', json={}).get_json()
+    assert data["ok"] is True
+    assert data["timeframe"] == "1m"
+    assert len(data["initial_candles"]) > 0
