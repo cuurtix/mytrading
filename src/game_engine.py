@@ -92,7 +92,8 @@ class TradingGameEngine:
         self.rng = np.random.default_rng(seed)
         self.config = config or ModelConfig()
         self.reference_df = bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
-        self.history = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+        self.history = self.bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
+        self.price = float(self.history["close"].iloc[-1])
         self.account = GameAccount()
         self.next_pos_id = 1
         self.phase_cycle = ["accumulation", "manipulation", "distribution"]
@@ -159,7 +160,10 @@ class TradingGameEngine:
             self.fvg.detect_new(feat_boot, i, state=str(r.get("state", "RANGE")), session=str(r.get("session_name", "ASIA")))
             self.fvg.update_fill(i, float(r["high"]), float(r["low"]))
 
-        self._bootstrap_history(int(self.rng.integers(200, 301)))
+        if self.history.empty:
+            self._bootstrap_history(int(self.rng.integers(200, 301)))
+        else:
+            self._refresh_liquidity_zones()
 
     def _push_event(self, msg: str) -> None:
         self.recent_events = ([msg] + self.recent_events)[:40]

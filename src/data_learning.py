@@ -5,7 +5,6 @@ from typing import Dict, List
 from collections import defaultdict
 
 import pandas as pd
-import numpy as np
 
 from src.behavior_learning import LearnedBehavior, learn_behavior
 from src.data_ingestion import IngestionConfig, IngestionReport, detect_timeframe_seconds, scan_data_sources
@@ -18,8 +17,6 @@ class CalibrationBundle:
     logs: List[str]
     timeframe_seconds: int
     timeframe_label: str
-    htf_context: Dict[str, Dict[str, float]]
-    htf_contexts: Dict[str, Dict[str, float]]
 
 
 def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = None) -> CalibrationBundle:
@@ -35,25 +32,6 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
         raise ValueError("Aucun dataset compatible (timeframe)")
 
     best_tf, best_group = max(groups.items(), key=lambda kv: sum(len(x.dataframe) for x in kv[1]))
-    htf_context: Dict[str, Dict[str, float]] = {}
-    for tf, ds_list in groups.items():
-        total_rows = sum(len(x.dataframe) for x in ds_list)
-        if total_rows < 20:
-            continue
-        df_last = max(ds_list, key=lambda x: x.dataframe["datetime"].max()).dataframe
-        last = float(df_last["close"].iloc[-1])
-        mean_price = float(np.mean([float(ds.dataframe["close"].mean()) for ds in ds_list]))
-        high_max = float(max(float(ds.dataframe["high"].max()) for ds in ds_list))
-        low_min = float(min(float(ds.dataframe["low"].min()) for ds in ds_list))
-        vol_mean = float(np.mean([float(ds.dataframe["close"].pct_change().std()) for ds in ds_list]))
-        range_mean = float(np.mean([float((ds.dataframe["high"] - ds.dataframe["low"]).mean()) for ds in ds_list]))
-        htf_context[tf] = {
-            "bias": float(np.sign(last - mean_price)),
-            "vol": vol_mean,
-            "dist_high": float((high_max - last) / max(last, 1e-8)),
-            "dist_low": float((last - low_min) / max(last, 1e-8)),
-            "range": range_mean,
-        }
     merged_list: List[pd.DataFrame] = []
     for ds in best_group:
         seg = ds.dataframe.sort_values("datetime").drop_duplicates(subset=["datetime"]).reset_index(drop=True)
@@ -84,8 +62,6 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
         logs=logs,
         timeframe_seconds=tf_seconds,
         timeframe_label=tf_label,
-        htf_context=htf_context,
-        htf_contexts=htf_context,
     )
 
 

@@ -87,14 +87,18 @@ def _initialize_runtime() -> None:
         scan_ms = int((time.perf_counter() - t_scan0) * 1000)
         _set_state(phase="learn_behavior", files_detected=files_detected)
         if not report.datasets:
-            raise ValueError(f"Aucun dataset valide trouvé dans {DATA_ROOT}. Vérifiez la présence de CSV/Excel OHLC.")
-        total_rows = sum(len(ds.dataframe) for ds in report.datasets)
-        if total_rows < 100:
-            raise ValueError(f"Données insuffisantes: {total_rows} lignes trouvées (minimum 100)")
-        t_learn0 = time.perf_counter()
-        bundle = learn_from_report(report, cfg=INGEST_CFG)
-        learn_ms = int((time.perf_counter() - t_learn0) * 1000)
-        used_fallback = False
+            bundle = _fallback_bundle()
+            learn_ms = None
+            used_fallback = True
+            _set_state(fallback_reason=f"Aucun dataset valide trouvé dans {DATA_ROOT}")
+        else:
+            total_rows = sum(len(ds.dataframe) for ds in report.datasets)
+            if total_rows < 100:
+                raise ValueError(f"Données insuffisantes: {total_rows} lignes trouvées (minimum 100)")
+            t_learn0 = time.perf_counter()
+            bundle = learn_from_report(report, cfg=INGEST_CFG)
+            learn_ms = int((time.perf_counter() - t_learn0) * 1000)
+            used_fallback = False
     except Exception as exc:
         scan_ms = None
         learn_ms = None
@@ -273,7 +277,7 @@ def reset():
     return jsonify({"ok": True, "snapshot": engine.snapshot()})
 
 
-_start_background_init()
+_initialize_runtime()
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8000, debug=False)
