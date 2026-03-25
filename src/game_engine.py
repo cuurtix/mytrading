@@ -31,7 +31,7 @@ class OnlineStats:
         self.returns.append(float(r))
         if len(self.returns) > self.window:
             self.returns.pop(0)
-        if len(self.returns) > 5:
+        if len(self.returns) > 10:
             arr = np.array(self.returns, dtype=float)
             self.vol = float(np.std(arr))
             self.avg_range = float(np.mean(np.abs(arr)))
@@ -626,10 +626,10 @@ class TradingGameEngine:
         wstats = {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08}
 
         base_vol = float(self.bundle.learned.volatility_stats["log_return_sigma"])
-        sigma = float(max(1e-6, blend(base_vol, self.online.vol, alpha=0.1)))
+        vol = float(max(1e-6, blend(base_vol, self.online.vol, alpha=0.1)))
         self.avg_range = float(blend(self.avg_range, max(1e-4, self.online.avg_range * max(float(self.history["close"].iloc[-1]), 1.0)), alpha=0.1))
-        noise = float(self.rng.normal(0.0, sigma * 0.05))
-        stochastic_return = float(self.rng.normal(0.0, sigma * 0.05))
+        noise = float(self.rng.normal(0.0, vol * 0.05))
+        stochastic_return = float(self.rng.normal(0.0, vol * 0.05))
 
         if self.phase == "accumulation":
             noise *= 0.5
@@ -660,14 +660,14 @@ class TradingGameEngine:
         order_blocks = self._detect_order_blocks()
         self.order_blocks = order_blocks
 
-        intention_price = self.generate_price(current_price, sigma)
+        intention_price = self.generate_price(current_price, vol)
         liquidity_targeting = self.liquidity_force(current_price)
         fvg_direct_pull = self.fvg_pull(current_price)
         ob_pull = self.order_block_pull(current_price, self.order_blocks)
-        struct_force = self.structure_force(current_price, sigma)
+        struct_force = self.structure_force(current_price, vol)
         drift = 0.0
-        drift += 0.2 * float(htf_ctx.get("bias", 0.0))
-        sigma *= (1.0 + float(htf_ctx.get("vol", 0.0)))
+        drift += 0.25 * float(htf_ctx.get("bias", 0.0))
+        vol *= (1.0 + float(htf_ctx.get("vol", 0.0)))
         struct_force += float(current_price * drift * 0.0005)
         residual = current_price * (stochastic_return + noise) * 0.05  # bruit faible, non dominant
         projected_price = max(
@@ -684,7 +684,9 @@ class TradingGameEngine:
         if self.last_sweep and self.market_structure["choch"]:
             panic_effect = -self.compute_panic()
 
-        next_close = max(0.01, projected_price + fomo_effect + panic_effect)
+        revert = 0.05 * (self.fair_price - current_price)
+        noise_final = vol * float(self.rng.normal())
+        next_close = max(0.01, projected_price + drift + revert + noise_final + fomo_effect + panic_effect)
         move = np.log(next_close / max(0.01, current_price))
         direction = int(np.sign(move) or 1)
         self.pending_player_impact *= self.config.pending_impact_decay
@@ -729,7 +731,7 @@ class TradingGameEngine:
                 next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
                 self._push_event(f"STOP_CASCADE score={cascade_score:.3f}")
 
-        if abs(move) > sigma * 2.2:
+        if abs(move) > vol * 2.2:
             gap_low = min(current_price, next_close)
             gap_high = max(current_price, next_close)
             self.fvg_targets.append({"low": gap_low, "high": gap_high, "ttl": 24.0})
@@ -762,13 +764,13 @@ class TradingGameEngine:
 
         state_map = {"MOVE_TO_LIQUIDITY": "RANGE", "SWEEP": "MANIPULATION", "EXPANSION": "BREAKOUT_ACCEPTED", "TREND": "EXPANSION_UP", "RANGE": "RANGE"}
         self.current_state = state_map.get(self.current_intention, "RANGE")
-        self.update_phase(sigma=sigma, move=float(move))
+        self.update_phase(sigma=vol, move=float(move))
 
-        if self.phase == "accumulation" and abs(move) > sigma * 1.15:
+        if self.phase == "accumulation" and abs(move) > vol * 1.15:
             self._advance_phase()
         elif self.phase == "manipulation":
             self._advance_phase()
-        elif self.phase == "distribution" and abs(move) < sigma * 0.9:
+        elif self.phase == "distribution" and abs(move) < vol * 0.9:
             self._advance_phase()
         self._refresh_liquidity_zones()
         self._enforce_liquidation_if_needed()

@@ -92,6 +92,12 @@ function setStatus(msg){
   document.getElementById('status').textContent = `${msg} • ${new Date().toLocaleTimeString()}`;
 }
 
+function showBanner(msg){
+  const b = document.getElementById('fallbackBanner');
+  b.style.display = 'block';
+  b.textContent = msg;
+}
+
 function renderDebug(debug, errorMsg=''){
   const info = document.getElementById('debugInfo');
   info.textContent = JSON.stringify(debug || {}, null, 2);
@@ -148,6 +154,8 @@ function refreshFromSnapshot(snap){
     const localTs = snap.timestamp ? new Date(snap.timestamp).toLocaleString() : new Date().toLocaleString();
     const mode = (snap.data_mode || '').toUpperCase();
     document.getElementById('price').innerText = Number(snap.last_price).toFixed(2);
+    document.getElementById('time').innerText = localTs;
+    document.getElementById('mode').innerText = snap.learning_mode || 'boot_only';
     setStatus(`Prêt • ${mode || 'REAL DATA'} • state=${snap.state} • last=${Number(snap.last_price).toFixed(2)} • ${localTs} • ${snap.learning_mode || ''}`);
   }
 }
@@ -194,9 +202,7 @@ async function init(){
     const st = await waitUntilReady();
     setStatus(`Moteur prêt (${st.fallback_used ? 'fallback' : 'datasets'}) • tf=${st.timeframe} • files=${st.files_detected} • ds=${st.datasets_retained}`);
     if(st.fallback_used){
-      const b = document.getElementById('fallbackBanner');
-      b.style.display = 'block';
-      b.textContent = `FALLBACK MODE — ${st.error || st.fallback_reason || 'données réelles indisponibles'}`;
+      showBanner(`FALLBACK MODE ACTIVE — ${st.error || st.fallback_reason || 'données réelles indisponibles'}`);
     } else {
       document.getElementById('fallbackBanner').style.display = 'none';
     }

@@ -38,7 +38,7 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
     htf_context: Dict[str, Dict[str, float]] = {}
     for tf, ds_list in groups.items():
         merged_tf = pd.concat([x.dataframe for x in ds_list], ignore_index=True).sort_values("datetime")
-        if len(merged_tf) < 10:
+        if len(merged_tf) < 20:
             continue
         last = float(merged_tf["close"].iloc[-1])
         mean_price = float(merged_tf["close"].mean())
@@ -47,6 +47,7 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
             "vol": float(merged_tf["close"].pct_change().std()),
             "dist_high": float((float(merged_tf["high"].max()) - last) / max(last, 1e-8)),
             "dist_low": float((last - float(merged_tf["low"].min())) / max(last, 1e-8)),
+            "range": float((merged_tf["high"] - merged_tf["low"]).mean()),
         }
     merged = (
         pd.concat([x.dataframe for x in best_group], ignore_index=True)
