@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict
+from collections import Counter
 
 import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
@@ -112,9 +113,9 @@ def _initialize_runtime() -> None:
                 "timeframe": bundle.timeframe_label,
                 "scan_time_ms": scan_ms,
                 "learn_time_ms": learn_ms,
-                "retained_files": list(getattr(report, "retained_files", [])) if not used_fallback else [],
-                "ignored_files": list(getattr(report, "ignored_files", []))[:80] if not used_fallback else [],
-                "ingestion_logs_tail": list(getattr(report, "logs", []))[-80:] if not used_fallback else ["fallback used"],
+                "retained_files": list(getattr(report, "debug", {}).get("retained_files", [])) if not used_fallback else [],
+                "ignored_files": list(getattr(report, "debug", {}).get("ignored_files", []))[:80] if not used_fallback else [],
+                "ingestion_logs_tail": list(getattr(report, "debug", {}).get("ingestion_logs", []))[-80:] if not used_fallback else ["fallback used"],
             }
         )
 
@@ -130,6 +131,11 @@ def _ensure_engine_ready() -> TradingGameEngine:
 
 def _debug_payload() -> Dict[str, Any]:
     with state_lock:
+        ignored = server_state["ignored_files"]
+        retained = server_state["retained_files"]
+        rejection_summary = Counter()
+        for item in ignored:
+            rejection_summary[item.get("reason", "unknown")] += 1
         return {
             "status": server_state["status"],
             "phase": server_state["phase"],
@@ -141,9 +147,10 @@ def _debug_payload() -> Dict[str, Any]:
             "load_time_ms": server_state["load_time_ms"],
             "scan_time_ms": server_state["scan_time_ms"],
             "learn_time_ms": server_state["learn_time_ms"],
-            "retained_files": server_state["retained_files"],
-            "ignored_files": server_state["ignored_files"],
-            "ingestion_logs_tail": server_state["ingestion_logs_tail"],
+            "retained_files": retained[:20],
+            "ignored_files": ignored[:20],
+            "ingestion_logs_tail": server_state["ingestion_logs_tail"][-20:],
+            "rejection_summary": dict(rejection_summary),
             "error": server_state["error"],
         }
 

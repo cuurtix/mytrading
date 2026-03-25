@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 import difflib
+import json
 import zipfile
 
 import numpy as np
@@ -18,6 +19,15 @@ CLOSE_ALIASES = {"close", "c"}
 VOLUME_ALIASES = {"volume", "basevolume", "tick_volume", "real_volume", "quotevolume", "usdtvolume"}
 VOLUME_PRIORITY = ["volume", "basevolume", "quotevolume", "usdtvolume", "tick_volume", "real_volume"]
 SUPPORTED_EXTS = {".zip", ".csv", ".xlsx", ".xls"}
+COLUMN_ALIASES = {
+    "timestamp": ["timestamp", "time", "date", "datetime", "open_time"],
+    "open": ["open", "o"],
+    "high": ["high", "h"],
+    "low": ["low", "l"],
+    "close": ["close", "c", "last"],
+    "volume": ["volume", "vol", "v"],
+}
+VERBOSE_INGESTION = True
 
 
 @dataclass(frozen=True)
@@ -48,9 +58,32 @@ class IngestionReport:
     supported_files_found: int = 0
     retained_files: List[str] = field(default_factory=list)
     ignored_files: List[Dict[str, str]] = field(default_factory=list)
+    debug: Dict[str, Any] = field(default_factory=dict)
 
     def log(self, message: str) -> None:
         self.logs.append(message)
+
+
+def make_ingestion_debug() -> Dict[str, Any]:
+    return {
+        "files_detected": 0,
+        "datasets_retained": 0,
+        "rows_merged": 0,
+        "retained_files": [],
+        "ignored_files": [],
+        "ingestion_logs": [],
+        "timeframe": "unknown",
+        "phase": "scan",
+        "ok": False,
+        "error": None,
+    }
+
+
+def log_ingestion(debug: Dict[str, Any], level: str, file_path: str | Path, message: str, **extra: Any) -> None:
+    entry = {"level": level, "file": str(file_path), "message": message, **extra}
+    debug["ingestion_logs"].append(entry)
+    if level in ("warning", "error"):
+        debug["ignored_files"].append({"file": str(file_path), "reason": message, **extra})
 
 
 def _normalize_col(name: str) -> str:
@@ -146,6 +179,53 @@ def sanitize_ohlc(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
     return df, before - len(df)
 
 
+def normalize_ohlc_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [str(c).strip().lower() for c in out.columns]
+    rename_map: Dict[str, str] = {}
+    for target, aliases in COLUMN_ALIASES.items():
+        for col in out.columns:
+            if col in aliases and target not in rename_map.values():
+                rename_map[col] = target
+                break
+    out = out.rename(columns=rename_map)
+
+    required = ["timestamp", "open", "high", "low", "close"]
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"missing_columns:{missing}")
+
+    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce", utc=True)
+    for c in ["open", "high", "low", "close"]:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    if "volume" in out.columns:
+        out["volume"] = pd.to_numeric(out["volume"], errors="coerce")
+    else:
+        out["volume"] = 0.0
+
+    out = out.dropna(subset=["timestamp", "open", "high", "low", "close"]).copy()
+    out = out[(out["high"] >= out["low"])]
+    out = out[(out["open"] >= out["low"]) & (out["open"] <= out["high"])]
+    out = out[(out["close"] >= out["low"]) & (out["close"] <= out["high"])]
+    out = out.sort_values("timestamp").drop_duplicates(subset=["timestamp"]).reset_index(drop=True)
+    return out
+
+
+def infer_timeframe(df: pd.DataFrame) -> str:
+    if len(df) < 3:
+        raise ValueError("not_enough_rows_for_timeframe")
+    deltas = df["timestamp"].sort_values().diff().dropna().dt.total_seconds()
+    deltas = deltas[deltas > 0]
+    if deltas.empty:
+        raise ValueError("no_positive_timestamp_delta")
+    step = float(deltas.mode().iloc[0])
+    mapping = {60: "1m", 180: "3m", 300: "5m", 900: "15m", 1800: "30m", 3600: "1h", 14400: "4h", 86400: "1d"}
+    nearest = min(mapping.keys(), key=lambda x: abs(x - step))
+    if abs(nearest - step) > max(1.0, nearest * 0.1):
+        raise ValueError(f"unknown_timeframe_step:{step}")
+    return mapping[nearest]
+
+
 def validate_dataset_continuity(df: pd.DataFrame, timeframe_seconds: int) -> Tuple[pd.DataFrame, Dict[str, int]]:
     stats = {"gaps_detected": 0, "gaps_filled": 0, "rows_removed": 0}
     if df.empty or timeframe_seconds <= 0:
@@ -212,8 +292,10 @@ def read_excel_dataset(file_or_bytes: str | Path | bytes, source_name: str, shee
 
 def read_zip_datasets(zip_path: str | Path, cfg: IngestionConfig | None = None) -> IngestionReport:
     cfg = cfg or IngestionConfig()
-    report = IngestionReport()
+    debug = make_ingestion_debug()
+    report = IngestionReport(debug=debug)
     report.log(f"[ZIP] opened: {zip_path}")
+    log_ingestion(debug, "info", zip_path, "zip_opened")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         for info in zf.infolist():
@@ -222,17 +304,31 @@ def read_zip_datasets(zip_path: str | Path, cfg: IngestionConfig | None = None) 
             lower = info.filename.lower()
             if not (lower.endswith(".xlsx") or lower.endswith(".xls") or lower.endswith(".csv")):
                 report.log(f"[ZIP] ignored inner file: {info.filename} reason=unsupported")
+                log_ingestion(debug, "warning", info.filename, "zip_inner_unsupported")
                 continue
 
             data = zf.read(info.filename)
             report.log(f"[ZIP] inner file read: {info.filename}")
+            log_ingestion(debug, "info", info.filename, "zip_inner_file_read")
             if lower.endswith(".csv"):
                 try:
                     raw = pd.read_csv(BytesIO(data))
-                    ds = _normalize_dataframe(raw, source_name=info.filename, sheet_name=None, source_type="zip_csv", report=report, cfg=cfg)
+                    log_ingestion(debug, "info", info.filename, "csv_loaded", rows_raw=len(raw), columns=list(raw.columns))
+                    clean = normalize_ohlc_dataframe(raw)
+                    log_ingestion(debug, "info", info.filename, "normalized", rows_raw=len(raw), rows_clean=len(clean))
+                    if len(clean) > cfg.max_rows_per_dataset:
+                        clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
+                    if clean.empty:
+                        log_ingestion(debug, "warning", info.filename, "dataset_empty_after_clean")
+                        continue
+                    timeframe = infer_timeframe(clean)
+                    log_ingestion(debug, "info", info.filename, "timeframe_inferred", timeframe=timeframe)
+                    tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+                    ds = NormalizedDataset(info.filename, "zip_csv", None, tf_seconds, timeframe, {}, clean.rename(columns={"timestamp": "datetime"}))
                     report.datasets.append(ds)
                 except Exception as exc:
                     report.log(f"[ZIP] csv parse failed {info.filename}: {exc}")
+                    log_ingestion(debug, "error", info.filename, "csv_read_failed", error=str(exc))
                 continue
 
             try:
@@ -240,12 +336,26 @@ def read_zip_datasets(zip_path: str | Path, cfg: IngestionConfig | None = None) 
                 for sheet in xls.sheet_names:
                     try:
                         report.log(f"[ZIP] sheet read: {info.filename}::{sheet}")
-                        ds = read_excel_dataset(data, source_name=info.filename, sheet_name=sheet, report=report, cfg=cfg)
+                        raw = pd.read_excel(BytesIO(data), sheet_name=sheet)
+                        log_ingestion(debug, "info", f"{info.filename}::{sheet}", "excel_loaded", rows_raw=len(raw), columns=list(raw.columns))
+                        clean = normalize_ohlc_dataframe(raw)
+                        log_ingestion(debug, "info", f"{info.filename}::{sheet}", "normalized", rows_raw=len(raw), rows_clean=len(clean))
+                        if len(clean) > cfg.max_rows_per_dataset:
+                            clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
+                        if clean.empty:
+                            log_ingestion(debug, "warning", f"{info.filename}::{sheet}", "dataset_empty_after_clean")
+                            continue
+                        timeframe = infer_timeframe(clean)
+                        log_ingestion(debug, "info", f"{info.filename}::{sheet}", "timeframe_inferred", timeframe=timeframe)
+                        tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+                        ds = NormalizedDataset(info.filename, "zip_excel", sheet, tf_seconds, timeframe, {}, clean.rename(columns={"timestamp": "datetime"}))
                         report.datasets.append(ds)
                     except Exception as exc:
                         report.log(f"[ZIP] sheet ignored {info.filename}::{sheet}: {exc}")
+                        log_ingestion(debug, "error", f"{info.filename}::{sheet}", "excel_sheet_failed", error=str(exc))
             except Exception as exc:
                 report.log(f"[ZIP] workbook failed {info.filename}: {exc}")
+                log_ingestion(debug, "error", info.filename, "excel_workbook_failed", error=str(exc))
     return report
 
 
@@ -262,7 +372,8 @@ def _ordered_supported_files(root: Path, strategy: str) -> List[Path]:
 def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None) -> IngestionReport:
     cfg = cfg or IngestionConfig()
     root = Path(root_path).expanduser().resolve()
-    report = IngestionReport(root_scanned=str(root))
+    debug = make_ingestion_debug()
+    report = IngestionReport(root_scanned=str(root), debug=debug)
     report.log(f"[SCAN] root={root}")
 
     if not root.exists():
@@ -271,6 +382,7 @@ def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None)
 
     all_files = _ordered_supported_files(root, cfg.selection_strategy)
     report.total_files_found = len(all_files)
+    debug["files_detected"] = len(all_files)
     supported_files = [p for p in all_files if p.suffix.lower() in SUPPORTED_EXTS]
     report.supported_files_found = len(supported_files)
     report.log(f"[SCAN] total files found={report.total_files_found}")
@@ -286,6 +398,7 @@ def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None)
 
     for path in selected:
         report.log(f"[SCAN] supported file retained: {path}")
+        log_ingestion(debug, "info", path, "file_detected", suffix=path.suffix.lower())
         report.retained_files.append(str(path))
         lower = path.suffix.lower()
         try:
@@ -293,22 +406,86 @@ def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None)
                 zip_report = read_zip_datasets(path, cfg=cfg)
                 report.datasets.extend(zip_report.datasets)
                 report.logs.extend(zip_report.logs)
+                debug["ingestion_logs"].extend(zip_report.debug.get("ingestion_logs", []))
+                debug["ignored_files"].extend(zip_report.debug.get("ignored_files", []))
             elif lower == ".csv":
-                raw = pd.read_csv(path)
-                ds = _normalize_dataframe(raw, source_name=str(path), sheet_name=None, source_type="csv", report=report, cfg=cfg)
+                try:
+                    raw = pd.read_csv(path)
+                    log_ingestion(debug, "info", path, "csv_loaded", rows_raw=len(raw), columns=list(raw.columns))
+                except Exception as e:
+                    log_ingestion(debug, "error", path, "csv_read_failed", error=str(e))
+                    continue
+                rows_raw = len(raw)
+                try:
+                    clean = normalize_ohlc_dataframe(raw)
+                    rows_clean = len(clean)
+                    log_ingestion(debug, "info", path, "normalized", rows_raw=rows_raw, rows_clean=rows_clean)
+                except Exception as e:
+                    log_ingestion(debug, "error", path, "normalize_failed", rows_raw=rows_raw, error=str(e))
+                    continue
+                if len(clean) > cfg.max_rows_per_dataset:
+                    clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
+                if clean.empty:
+                    log_ingestion(debug, "warning", path, "dataset_empty_after_clean")
+                    continue
+                try:
+                    timeframe = infer_timeframe(clean)
+                    log_ingestion(debug, "info", path, "timeframe_inferred", timeframe=timeframe)
+                except Exception as e:
+                    log_ingestion(debug, "warning", path, "timeframe_inference_failed", error=str(e))
+                    continue
+                tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+                ds = NormalizedDataset(str(path), "csv", None, tf_seconds, timeframe, {}, clean.rename(columns={"timestamp": "datetime"}))
                 report.datasets.append(ds)
+                debug["retained_files"].append({"file": str(path), "timeframe": timeframe, "rows": len(clean)})
             elif lower in {".xlsx", ".xls"}:
-                xls = pd.ExcelFile(path)
-                report.log(f"[PARSE] workbook opened: {path}")
+                try:
+                    xls = pd.ExcelFile(path)
+                except Exception as e:
+                    log_ingestion(debug, "error", path, "excel_open_failed", error=str(e))
+                    continue
                 for sheet in xls.sheet_names:
-                    report.log(f"[PARSE] sheet read: {path}::{sheet}")
-                    ds = read_excel_dataset(path, source_name=str(path), sheet_name=sheet, report=report, cfg=cfg)
+                    try:
+                        raw = pd.read_excel(path, sheet_name=sheet)
+                        log_ingestion(debug, "info", f"{path}::{sheet}", "excel_loaded", rows_raw=len(raw), columns=list(raw.columns))
+                    except Exception as e:
+                        log_ingestion(debug, "error", f"{path}::{sheet}", "excel_read_failed", error=str(e))
+                        continue
+                    rows_raw = len(raw)
+                    try:
+                        clean = normalize_ohlc_dataframe(raw)
+                        rows_clean = len(clean)
+                        log_ingestion(debug, "info", f"{path}::{sheet}", "normalized", rows_raw=rows_raw, rows_clean=rows_clean)
+                    except Exception as e:
+                        log_ingestion(debug, "error", f"{path}::{sheet}", "normalize_failed", rows_raw=rows_raw, error=str(e))
+                        continue
+                    if len(clean) > cfg.max_rows_per_dataset:
+                        clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
+                    if clean.empty:
+                        log_ingestion(debug, "warning", f"{path}::{sheet}", "dataset_empty_after_clean")
+                        continue
+                    try:
+                        timeframe = infer_timeframe(clean)
+                        log_ingestion(debug, "info", f"{path}::{sheet}", "timeframe_inferred", timeframe=timeframe)
+                    except Exception as e:
+                        log_ingestion(debug, "warning", f"{path}::{sheet}", "timeframe_inference_failed", error=str(e))
+                        continue
+                    tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+                    ds = NormalizedDataset(str(path), "excel", sheet, tf_seconds, timeframe, {}, clean.rename(columns={"timestamp": "datetime"}))
                     report.datasets.append(ds)
+                    debug["retained_files"].append({"file": f"{path}::{sheet}", "timeframe": timeframe, "rows": len(clean)})
         except Exception as exc:
             report.ignored_files.append({"path": str(path), "reason": str(exc)})
             report.log(f"[SCAN] ignored file: {path} reason={exc}")
+            log_ingestion(debug, "error", path, "scan_read_failed", error=str(exc))
 
     report.log(f"[SCAN] datasets normalized={len(report.datasets)}")
+    debug["datasets_retained"] = len(report.datasets)
+    if len(report.datasets) == 0:
+        debug["ok"] = False
+        debug["error"] = "no_valid_dataset_retained"
+    if VERBOSE_INGESTION:
+        print(json.dumps(debug["ingestion_logs"][-20:], ensure_ascii=False, indent=2, default=str))
     return report
 
 
