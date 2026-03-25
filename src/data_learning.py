@@ -19,6 +19,7 @@ class CalibrationBundle:
     timeframe_seconds: int
     timeframe_label: str
     htf_context: Dict[str, Dict[str, float]]
+    htf_contexts: Dict[str, Dict[str, float]]
 
 
 def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = None) -> CalibrationBundle:
@@ -71,6 +72,7 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
         timeframe_seconds=tf_seconds,
         timeframe_label=tf_label,
         htf_context=htf_context,
+        htf_contexts=htf_context,
     )
 
 

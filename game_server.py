@@ -194,6 +194,7 @@ def init_game():
         return jsonify({"ok": False, "loading": True, "reason": "initialization in progress", "debug": _debug_payload()})
 
     snap = e.snapshot()
+    snap["data_mode"] = _debug_payload()["data_mode"]
     initial_candles = e.history.tail(250).to_dict(orient="records")
     return jsonify({
         "ok": True,
@@ -213,7 +214,11 @@ def step():
         e = _ensure_engine_ready()
     except RuntimeError:
         return jsonify({"ok": False, "reason": "Engine not ready", "debug": _debug_payload()})
-    return jsonify(e.step_market())
+    out = e.step_market()
+    out["data_mode"] = _debug_payload()["data_mode"]
+    if isinstance(out.get("snapshot"), dict):
+        out["snapshot"]["data_mode"] = out["data_mode"]
+    return jsonify(out)
 
 
 @app.post("/api/order")

@@ -17,6 +17,29 @@ from src.model_config import ModelConfig
 from src.sessions import xauusd_session_name
 
 
+class OnlineStats:
+    def __init__(self, window: int = 500):
+        self.window = window
+        self.returns: list[float] = []
+        self.vol = 0.0
+        self.avg_range = 0.0
+        self.sweep_freq = 0.0
+        self.trend_strength = 0.0
+
+    def update(self, candle: Dict[str, float], sweep_flag: int = 0) -> None:
+        o = max(1e-8, float(candle["open"]))
+        c = float(candle["close"])
+        r = (c - o) / o
+        self.returns.append(float(r))
+        if len(self.returns) > self.window:
+            self.returns.pop(0)
+        arr = np.array(self.returns, dtype=float) if self.returns else np.array([0.0])
+        self.vol = float(np.std(arr))
+        self.avg_range = float(np.mean(np.abs(arr)))
+        self.sweep_freq = float((self.sweep_freq * 0.95) + (0.05 * int(bool(sweep_flag))))
+        self.trend_strength = float(np.clip(np.mean(arr[-30:]) / (self.vol + 1e-8), -3.0, 3.0))
+
+
 @dataclass
 class GamePosition:
     id: int
@@ -68,6 +91,7 @@ class TradingGameEngine:
         self.avg_range = float(max(0.05, bundle.learned.volatility_stats.get("range_mean", 0.2)))
         self.volatility = float(max(1e-6, bundle.learned.volatility_stats.get("log_return_sigma", 1e-4)))
         self.fair_price = float(self.reference_df["close"].tail(100).mean())
+        self.online = OnlineStats(window=500)
         self.intent_state = {
             "phase": "ACCUMULATION",
             "target": None,
@@ -152,6 +176,8 @@ class TradingGameEngine:
             "amd_phase": self.amd_phase,
             "market_structure": self.market_structure.copy(),
             "intention": self.current_intention,
+            "learning_mode": "boot_plus_online",
+            "online_volatility": self.online.vol,
             "liquidity": {"buyside": list(self.liquidity["buyside"][-15:]), "sellside": list(self.liquidity["sellside"][-15:])},
             "recent_events": self.recent_events,
             "recent_order_participation": self.recent_order_participation,
@@ -597,7 +623,10 @@ class TradingGameEngine:
         range_sigma = max(self.avg_range * 0.35, 1e-4)
         wstats = {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08}
 
-        sigma = float(self.volatility_scale())
+        alpha = 0.1
+        sigma_boot = float(self.volatility_scale())
+        sigma = float((1 - alpha) * sigma_boot + alpha * max(1e-6, self.online.vol))
+        self.avg_range = float((1 - alpha) * self.avg_range + alpha * max(1e-4, self.online.avg_range * max(float(current_price if "current_price" in locals() else self.history["close"].iloc[-1]), 1.0)))
         noise = float(self.rng.normal(0.0, sigma * 0.05))
         stochastic_return = float(self.rng.normal(0.0, sigma * 0.05))
 
@@ -624,6 +653,7 @@ class TradingGameEngine:
                     liquidity_effect = np.log(max(0.01, self.liquidity_high * (1 + hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
 
         current_price = float(self.history["close"].iloc[-1])
+        htf_ctx = self.bundle.htf_context.get("1h") or next(iter(self.bundle.htf_context.values()), {"bias": 0.0, "compression": 0.0})
         self._update_liquidity_pools()
         fvg_levels = self._detect_fvg_levels()
         order_blocks = self._detect_order_blocks()
@@ -634,6 +664,8 @@ class TradingGameEngine:
         fvg_direct_pull = self.fvg_pull(current_price)
         ob_pull = self.order_block_pull(current_price, self.order_blocks)
         struct_force = self.structure_force(current_price, sigma)
+        struct_force += float(current_price * 0.0003 * float(htf_ctx.get("bias", 0.0)))
+        sigma *= (1.0 + min(0.5, abs(float(htf_ctx.get("compression", 0.0))) / max(current_price, 1.0)))
         residual = current_price * (stochastic_return + noise) * 0.05  # bruit faible, non dominant
         projected_price = max(
             0.01,
@@ -716,6 +748,7 @@ class TradingGameEngine:
         if errs:
             self._push_event("MONITOR_OHLC: " + ",".join(errs))
         self.history = pd.concat([self.history, pd.DataFrame([row])], ignore_index=True).tail(2000).reset_index(drop=True)
+        self.online.update(row, sweep_flag=int(bool(sweep["recent_sweep_flag"])))
 
         feat_new = add_market_features(self.history.tail(80).copy()).iloc[-1]
         self.lmap.ingest_feature_row(len(self.history), feat_new, rolling_high=float(self.history["high"].tail(30).max()), rolling_low=float(self.history["low"].tail(30).min()))
