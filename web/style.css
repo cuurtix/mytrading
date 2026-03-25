@@ -1,5 +1,6 @@
 body { font-family: Arial, sans-serif; margin:0; background:#0f1220; color:#e8ecff; }
 header { padding:12px 16px; background:#171b2f; display:flex; justify-content:space-between; }
+.fallback-banner { background:#7a1010; color:#fff; padding:8px 12px; font-weight:700; }
 main { display:grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap:12px; padding:12px; }
 .panel { background:#1b2140; padding:12px; border-radius:8px; }
 .row { display:flex; gap:8px; margin:8px 0; flex-wrap:wrap; }

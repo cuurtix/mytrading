@@ -29,6 +29,7 @@ class LearnedBehavior:
     market_profile: Dict[str, float]
     historical_contexts: pd.DataFrame
     context_index: Dict[str, list[int]]
+    context_scaler: Dict[str, Dict[str, float]]
     feature_df: pd.DataFrame
 
     def find_similar_contexts(self, current_context: Dict[str, float], state: str, n_neighbors: int = 10) -> list[int]:
@@ -47,11 +48,16 @@ class LearnedBehavior:
             "recent_sweep_strength",
         ]
         distances: list[tuple[float, int]] = []
+        scaler = self.context_scaler
         for idx in candidates:
             hist_row = self.historical_contexts.iloc[idx]
             d = 0.0
             for f in features:
-                d += (float(current_context.get(f, 0.0)) - float(hist_row.get(f, 0.0))) ** 2
+                mu = float(scaler.get(f, {}).get("mean", 0.0))
+                sd = max(1e-6, float(scaler.get(f, {}).get("std", 1.0)))
+                cur = np.clip((float(current_context.get(f, 0.0)) - mu) / sd, -6.0, 6.0)
+                hv = np.clip((float(hist_row.get(f, 0.0)) - mu) / sd, -6.0, 6.0)
+                d += (cur - hv) ** 2
             distances.append((d, idx))
         distances.sort(key=lambda x: x[0])
         return [idx for _, idx in distances[:n_neighbors]]
@@ -214,6 +220,10 @@ def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
         "log_return",
     ]
     historical_contexts = states[context_features + ["state"]].copy().reset_index(drop=True)
+    context_scaler: Dict[str, Dict[str, float]] = {}
+    for f in context_features:
+        vals = pd.to_numeric(historical_contexts[f], errors="coerce")
+        context_scaler[f] = {"mean": float(vals.mean()), "std": float(vals.std(ddof=0) + 1e-6)}
     context_index: Dict[str, list[int]] = {}
     for state in historical_contexts["state"].unique():
         context_index[str(state)] = historical_contexts[historical_contexts["state"] == state].index.tolist()
@@ -230,5 +240,6 @@ def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
         market_profile,
         historical_contexts,
         context_index,
+        context_scaler,
         states,
     )

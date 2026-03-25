@@ -5,6 +5,7 @@ from typing import Dict, List
 from collections import defaultdict
 
 import pandas as pd
+import numpy as np
 
 from src.behavior_learning import LearnedBehavior, learn_behavior
 from src.data_ingestion import IngestionConfig, IngestionReport, detect_timeframe_seconds, scan_data_sources
@@ -17,6 +18,7 @@ class CalibrationBundle:
     logs: List[str]
     timeframe_seconds: int
     timeframe_label: str
+    htf_context: Dict[str, Dict[str, float]]
 
 
 def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = None) -> CalibrationBundle:
@@ -32,6 +34,15 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
         raise ValueError("Aucun dataset compatible (timeframe)")
 
     best_tf, best_group = max(groups.items(), key=lambda kv: sum(len(x.dataframe) for x in kv[1]))
+    htf_context: Dict[str, Dict[str, float]] = {}
+    for tf, ds_list in groups.items():
+        merged_tf = pd.concat([x.dataframe for x in ds_list], ignore_index=True).sort_values("datetime")
+        htf_context[tf] = {
+            "bias": float(np.sign((merged_tf["close"].iloc[-1] - merged_tf["close"].iloc[0]) if len(merged_tf) else 0.0)),
+            "dist_to_high": float((merged_tf["high"].max() - merged_tf["close"].iloc[-1]) if len(merged_tf) else 0.0),
+            "dist_to_low": float((merged_tf["close"].iloc[-1] - merged_tf["low"].min()) if len(merged_tf) else 0.0),
+            "compression": float((merged_tf["high"] - merged_tf["low"]).tail(30).mean() if len(merged_tf) else 0.0),
+        }
     merged = (
         pd.concat([x.dataframe for x in best_group], ignore_index=True)
         .sort_values("datetime")
@@ -59,6 +70,7 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
         logs=logs,
         timeframe_seconds=tf_seconds,
         timeframe_label=tf_label,
+        htf_context=htf_context,
     )
 
 

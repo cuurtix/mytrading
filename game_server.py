@@ -35,6 +35,9 @@ server_state: Dict[str, Any] = {
     "retained_files": [],
     "ignored_files": [],
     "ingestion_logs_tail": [],
+    "data_mode": "real",
+    "fallback_reason": None,
+    "session_timezone_mode": "utc",
 }
 
 engine: TradingGameEngine | None = None
@@ -97,7 +100,7 @@ def _initialize_runtime() -> None:
         learn_ms = None
         bundle = _fallback_bundle()
         used_fallback = True
-        _set_state(error=f"Échec chargement données: {exc}. Utilisation fallback synthétique.")
+        _set_state(error=f"Échec chargement données: {exc}. Utilisation fallback synthétique.", fallback_reason=str(exc))
 
     with state_lock:
         cached_bundle = bundle
@@ -116,6 +119,7 @@ def _initialize_runtime() -> None:
                 "retained_files": list(getattr(report, "debug", {}).get("retained_files", [])) if not used_fallback else [],
                 "ignored_files": list(getattr(report, "debug", {}).get("ignored_files", []))[:80] if not used_fallback else [],
                 "ingestion_logs_tail": list(getattr(report, "debug", {}).get("ingestion_logs", []))[-80:] if not used_fallback else ["fallback used"],
+                "data_mode": "fallback" if used_fallback else "real",
             }
         )
 
@@ -152,6 +156,11 @@ def _debug_payload() -> Dict[str, Any]:
             "ingestion_logs_tail": server_state["ingestion_logs_tail"][-20:],
             "rejection_summary": dict(rejection_summary),
             "error": server_state["error"],
+            "data_mode": server_state["data_mode"],
+            "fallback_reason": server_state["fallback_reason"],
+            "engine_timezone": "UTC",
+            "display_timezone": "local_browser",
+            "session_timezone_mode": server_state.get("session_timezone_mode", "utc"),
         }
 
 
@@ -189,6 +198,8 @@ def init_game():
     return jsonify({
         "ok": True,
         "timeframe": e.bundle.timeframe_label,
+        "data_mode": _debug_payload()["data_mode"],
+        "disable_auto_run": bool(_debug_payload()["data_mode"] == "fallback"),
         "initial_candles": initial_candles,
         "snapshot": snap,
         "debug": _debug_payload(),

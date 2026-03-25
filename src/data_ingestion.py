@@ -139,6 +139,8 @@ def _map_columns(df: pd.DataFrame) -> Dict[str, str]:
 def _detect_header_and_read_excel(io_obj, sheet_name: str) -> pd.DataFrame:
     for header_row in range(0, 8):
         try:
+            if hasattr(io_obj, "seek"):
+                io_obj.seek(0)
             df = pd.read_excel(io_obj, sheet_name=sheet_name, header=header_row)
             _map_columns(df)
             return df
@@ -238,16 +240,16 @@ def infer_timeframe(df: pd.DataFrame) -> str:
     return mapping[nearest]
 
 
-def validate_dataset_continuity(df: pd.DataFrame, timeframe_seconds: int) -> Tuple[pd.DataFrame, Dict[str, int]]:
+def split_by_continuity(df: pd.DataFrame, timeframe_seconds: int) -> Tuple[List[pd.DataFrame], Dict[str, int]]:
     stats = {"gaps_detected": 0, "gaps_filled": 0, "rows_removed": 0}
     if df.empty or timeframe_seconds <= 0:
-        return df, stats
+        return [df], stats
 
     time_diffs = df["datetime"].diff().dt.total_seconds()
     large_gaps = time_diffs > (timeframe_seconds * 3)
     stats["gaps_detected"] = int(large_gaps.sum())
     if stats["gaps_detected"] == 0:
-        return df, stats
+        return [df], stats
 
     gap_indices = df[large_gaps].index.tolist()
     segments: List[Tuple[int, int]] = []
@@ -259,12 +261,13 @@ def validate_dataset_continuity(df: pd.DataFrame, timeframe_seconds: int) -> Tup
     if start < len(df):
         segments.append((start, len(df) - 1))
     if not segments:
-        return df, stats
-
-    longest = max(segments, key=lambda x: x[1] - x[0])
-    df_clean = df.iloc[longest[0] : longest[1] + 1].copy().reset_index(drop=True)
-    stats["rows_removed"] = int(len(df) - len(df_clean))
-    return df_clean, stats
+        return [df], stats
+    out = []
+    for s, e in segments:
+        seg = df.iloc[s : e + 1].copy().reset_index(drop=True)
+        if not seg.empty:
+            out.append(seg)
+    return out, stats
 
 
 def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | None, source_type: str, report: IngestionReport | None = None, cfg: IngestionConfig | None = None) -> NormalizedDataset:
@@ -285,7 +288,8 @@ def _normalize_dataframe(df: pd.DataFrame, source_name: str, sheet_name: str | N
     if len(out) > cfg.max_rows_per_dataset:
         out = out.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
     timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
-    out, continuity_stats = validate_dataset_continuity(out, timeframe_seconds)
+    segments, continuity_stats = split_by_continuity(out, timeframe_seconds)
+    out = max(segments, key=len) if segments else out
     timeframe_seconds, timeframe_label = detect_timeframe_seconds(out["datetime"])
     if report:
         report.log(f"[PARSE] timeframe={timeframe_label} ({timeframe_seconds}s) source={source_name}{'::'+sheet_name if sheet_name else ''}")
@@ -302,15 +306,29 @@ def read_excel_dataset(file_or_bytes: str | Path | bytes, source_name: str, shee
     return _normalize_dataframe(raw, source_name=source_name, sheet_name=sheet_name, source_type="excel", report=report, cfg=cfg)
 
 
-def read_zip_file(path: str | Path) -> List[pd.DataFrame]:
-    dfs: List[pd.DataFrame] = []
+def read_zip_members(path: str | Path) -> List[Tuple[str, pd.DataFrame]]:
+    members: List[Tuple[str, pd.DataFrame]] = []
     with zipfile.ZipFile(path, "r") as z:
         for name in z.namelist():
-            if name.endswith(".csv"):
+            lname = name.lower()
+            if lname.endswith(".csv"):
                 with z.open(name) as f:
                     df = pd.read_csv(io.BytesIO(f.read()))
-                    dfs.append(df)
-    return dfs
+                    members.append((name, df))
+            elif lname.endswith(".xlsx") or lname.endswith(".xls"):
+                data = io.BytesIO(z.read(name))
+                xls = pd.ExcelFile(data)
+                for sheet in xls.sheet_names:
+                    try:
+                        raw = _detect_header_and_read_excel(data, sheet)
+                        members.append((f"{name}::{sheet}", raw))
+                    except Exception:
+                        continue
+    return members
+
+
+def read_zip_file(path: str | Path) -> List[pd.DataFrame]:
+    return [df for _, df in read_zip_members(path)]
 
 
 def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
@@ -375,39 +393,58 @@ def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None)
                         log_ingestion(debug, "warning", path, "max_files_limit_reached", limit=cfg.max_files)
                         continue
                     processed_supported += 1
-                    raw_dfs = read_zip_file(path)
+                    raw_members = read_zip_members(path)
                 elif file.endswith(".csv"):
                     if processed_supported >= cfg.max_files:
                         log_ingestion(debug, "warning", path, "max_files_limit_reached", limit=cfg.max_files)
                         continue
                     processed_supported += 1
-                    raw_dfs = [pd.read_csv(path)]
+                    raw_members = [(path.name, pd.read_csv(path))]
+                elif file.endswith(".xlsx") or file.endswith(".xls"):
+                    if processed_supported >= cfg.max_files:
+                        log_ingestion(debug, "warning", path, "max_files_limit_reached", limit=cfg.max_files)
+                        continue
+                    processed_supported += 1
+                    xls = pd.ExcelFile(path)
+                    raw_members = []
+                    for sheet in xls.sheet_names:
+                        try:
+                            raw = _detect_header_and_read_excel(path, sheet)
+                            raw_members.append((f"{path.name}::{sheet}", raw))
+                        except Exception as e:
+                            log_ingestion(debug, "warning", f"{path}::{sheet}", "excel_sheet_invalid", error=str(e))
                 else:
                     log_ingestion(debug, "warning", path, "unsupported_extension")
                     continue
 
-                for raw in raw_dfs:
+                for member_name, raw in raw_members:
                     rows_raw = len(raw)
                     try:
                         clean = normalize_ohlc(raw)
                         rows_clean = len(clean)
-                        log_ingestion(debug, "info", path, "normalized", rows_raw=rows_raw, rows_clean=rows_clean)
+                        log_ingestion(debug, "info", f"{path}::{member_name}", "normalized", rows_raw=rows_raw, rows_clean=rows_clean)
                     except Exception as e:
-                        log_ingestion(debug, "error", path, "normalize_failed", rows_raw=rows_raw, error=str(e))
+                        log_ingestion(debug, "error", f"{path}::{member_name}", "normalize_failed", rows_raw=rows_raw, error=str(e))
                         continue
                     if len(clean) < cfg.min_rows_per_dataset:
-                        log_ingestion(debug, "warning", path, "dataset_too_small", rows_clean=len(clean))
+                        log_ingestion(debug, "warning", f"{path}::{member_name}", "dataset_too_small", rows_clean=len(clean))
                         continue
                     if len(clean) > cfg.max_rows_per_dataset:
                         clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
                     try:
                         tf = infer_timeframe(clean)
                     except Exception as e:
-                        log_ingestion(debug, "warning", path, "timeframe_inference_failed", error=str(e))
+                        log_ingestion(debug, "warning", f"{path}::{member_name}", "timeframe_inference_failed", error=str(e))
                         continue
                     tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
-                    datasets.append(NormalizedDataset(str(path), "csv" if file.endswith(".csv") else "zip_csv", None, tf_seconds, tf, {}, clean.rename(columns={"timestamp": "datetime"})))
-                    debug["retained_files"].append({"file": str(path), "timeframe": tf, "rows": len(clean)})
+                    segs, seg_stats = split_by_continuity(clean.rename(columns={"timestamp": "datetime"}), tf_seconds)
+                    for seg_i, seg in enumerate(segs):
+                        if len(seg) < cfg.min_rows_per_dataset:
+                            continue
+                        ds_name = f"{path}::{member_name}::seg{seg_i}"
+                        ds_type = "csv" if file.endswith(".csv") else ("excel" if file.endswith(".xlsx") or file.endswith(".xls") else "zip_mixed")
+                        datasets.append(NormalizedDataset(str(ds_name), ds_type, None, tf_seconds, tf, {}, seg))
+                        debug["retained_files"].append({"file": str(ds_name), "timeframe": tf, "rows": len(seg), "gaps_detected": seg_stats["gaps_detected"]})
             except Exception as e:
                 log_ingestion(debug, "error", path, "read_failed", error=str(e))
 

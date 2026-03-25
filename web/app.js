@@ -89,7 +89,7 @@ function logEvent(msg){
 }
 
 function setStatus(msg){
-  document.getElementById('status').textContent = msg;
+  document.getElementById('status').textContent = `${msg} • ${new Date().toLocaleTimeString()}`;
 }
 
 function renderDebug(debug, errorMsg=''){
@@ -190,6 +190,13 @@ async function init(){
   try {
     const st = await waitUntilReady();
     setStatus(`Moteur prêt (${st.fallback_used ? 'fallback' : 'datasets'})`);
+    if(st.fallback_used){
+      const b = document.getElementById('fallbackBanner');
+      b.style.display = 'block';
+      b.textContent = `FALLBACK MODE — ${st.error || st.fallback_reason || 'données réelles indisponibles'}`;
+    } else {
+      document.getElementById('fallbackBanner').style.display = 'none';
+    }
     const t0 = performance.now();
     const d = await api('/api/init', {}, {timeoutMs:12000});
     const elapsed = Math.round(performance.now() - t0);
@@ -208,7 +215,7 @@ async function init(){
     refreshFromSnapshot(d.snapshot || d);
     renderDebug({...d.debug, init_request_ms: elapsed});
     logEvent(`Init terminé en ${elapsed}ms, candles=${incoming.length}`);
-    startMarket();
+    if(!d.disable_auto_run) startMarket();
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     setStatus('Erreur d\'initialisation');
