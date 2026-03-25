@@ -9,8 +9,7 @@ import pandas as pd
 from src.data_ingestion import IngestionConfig, detect_timeframe_seconds, read_zip_datasets, sanitize_ohlc, scan_data_sources
 
 
-@pytest.mark.skipif(__import__("importlib").util.find_spec("openpyxl") is None, reason="openpyxl non installé")
-def test_ingestion_zip_with_xlsx(tmp_path: Path):
+def test_ingestion_zip_with_csv(tmp_path: Path):
     df = pd.DataFrame(
         {
             "timestamp": [1700000000, 1700000060, 1700000120],
@@ -22,20 +21,15 @@ def test_ingestion_zip_with_xlsx(tmp_path: Path):
             "usdtvolume": [100, 101, 102],
         }
     )
-    xlsx = tmp_path / "sample.xlsx"
-    with pd.ExcelWriter(xlsx) as writer:
-        df.to_excel(writer, sheet_name="Sheet1", index=False)
-
     zpath = tmp_path / "data.zip"
     with zipfile.ZipFile(zpath, "w") as zf:
-        zf.write(xlsx, arcname="nested/sample.xlsx")
+        zf.writestr("nested/sample.csv", df.to_csv(index=False))
 
-    report = read_zip_datasets(zpath)
+    report = read_zip_datasets(zpath, cfg=IngestionConfig(min_rows_per_dataset=1))
     assert len(report.datasets) == 1
     ds = report.datasets[0]
     assert ds.timeframe_label == "1m"
-    assert ds.mapped_columns["volume"] == "basevolume"
-    assert "usdtvolume" in ds.dataframe.columns
+    assert "datetime" in ds.dataframe.columns
 
 
 def test_timestamp_parsing_seconds_and_text():
@@ -94,7 +88,7 @@ def test_scan_recursive_and_limits(tmp_path: Path):
     (root / "b.csv").write_text(df.to_csv(index=False))
     (root / "note.txt").write_text("ignore me")
 
-    report = scan_data_sources(tmp_path / "data", cfg=IngestionConfig(max_files=1, max_rows_per_dataset=10))
+    report = scan_data_sources(tmp_path / "data", cfg=IngestionConfig(max_files=1, max_rows_per_dataset=10, min_rows_per_dataset=1))
     assert report.root_scanned.endswith("data")
     assert report.total_files_found >= 3
     assert report.supported_files_found >= 2

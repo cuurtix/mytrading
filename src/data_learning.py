@@ -51,6 +51,7 @@ def learn_from_report(report: IngestionReport, cfg: IngestionConfig | None = Non
     logs = list(report.logs)
     logs.append(f"timeframe détecté: {tf_label} ({tf_seconds}s)")
     logs.append("calibration terminée")
+    report.debug.update({"phase": "learn_behavior", "ok": True, "error": None, "timeframe": tf_label})
 
     return CalibrationBundle(
         merged_df=merged,
