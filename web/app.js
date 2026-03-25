@@ -116,12 +116,30 @@ async function api(path, payload={}, {timeoutMs=12000, method='POST'} = {}){
   }
 }
 
-function renderMetrics(m){ document.getElementById('metrics').textContent = JSON.stringify(m || {}, null, 2); }
-function renderPositions(ps){ document.getElementById('positions').innerHTML = (ps || []).map(p => `#${p.id} ${p.side} size=${p.size.toFixed(2)} entry=${p.entry.toFixed(2)} lev=${p.leverage}`).join('<br/>') || 'Aucune'; }
+function format(n){
+  return Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function updatePortfolio(data){
+  const m = data?.metrics || {};
+  document.getElementById('balance').innerText = format(m.balance);
+  document.getElementById('equity').innerText = format(m.equity);
+  document.getElementById('pnl').innerText = format(m.unrealized_pnl);
+}
+
+function renderPositions(ps){
+  const el = document.getElementById('positions');
+  const rows = (ps || []).map(p => `
+    <div class="pos">
+      ${String(p.side).toUpperCase()} | ${format(p.size)} | ${Number(p.entry).toFixed(2)}
+    </div>
+  `).join('');
+  el.innerHTML = rows || '<div class="pos">Aucune position ouverte</div>';
+}
 
 function refreshFromSnapshot(snap){
   if(!snap) return;
-  renderMetrics(snap.metrics);
+  updatePortfolio(snap);
   renderPositions(snap.positions || []);
   if(Array.isArray(snap.recent_events)){
     document.getElementById('events').innerHTML = snap.recent_events.map(e => `<div>${e}</div>`).join('');
@@ -148,6 +166,10 @@ function appendCandle(candle){
   else candles.push(b);
   while(candles.length > 600) candles.shift();
   drawCandles();
+}
+
+function updateChart(candle){
+  appendCandle(candle);
 }
 
 async function waitUntilReady(maxWaitMs=45000){
@@ -186,6 +208,7 @@ async function init(){
     refreshFromSnapshot(d.snapshot || d);
     renderDebug({...d.debug, init_request_ms: elapsed});
     logEvent(`Init terminé en ${elapsed}ms, candles=${incoming.length}`);
+    startMarket();
   } catch (err) {
     const message = err && err.message ? err.message : String(err);
     setStatus('Erreur d\'initialisation');
@@ -198,23 +221,28 @@ async function step(){
   try {
     const d = await api('/api/step');
     if(!d.ok){ logEvent(`STEP refusé: ${d.reason || 'unknown'}`); return; }
-    appendCandle(d.candle);
+    updateChart(d.candle);
     refreshFromSnapshot(d.snapshot);
-    logEvent(`state=${d.state} close=${Number(d.candle.close).toFixed(2)} sweep=${d.sweep.recent_sweep_flag}`);
+    logEvent(`phase=${d.phase || 'n/a'} state=${d.state} close=${Number(d.candle.close).toFixed(2)}`);
   } catch (err) {
     logEvent(`STEP ERROR: ${err.message || err}`);
   }
 }
 
-function runLoop(){
-  if(!running) return;
-  step();
-  timer = setTimeout(runLoop, Number(document.getElementById('speed').value || 500));
+function startMarket(){
+  if(running) return;
+  running = true;
+  timer = setInterval(step, 3000);
+}
+
+function stopMarket(){
+  running = false;
+  if(timer) clearInterval(timer);
 }
 
 document.getElementById('btnStep').onclick = step;
-document.getElementById('btnRun').onclick = ()=>{ running=true; runLoop(); };
-document.getElementById('btnPause').onclick = ()=>{ running=false; if(timer) clearTimeout(timer); };
+document.getElementById('btnRun').onclick = startMarket;
+document.getElementById('btnPause').onclick = stopMarket;
 document.getElementById('recenter').onclick = ()=>{ viewBars = 180; drawCandles(); };
 
 document.getElementById('buy').onclick = async()=>{

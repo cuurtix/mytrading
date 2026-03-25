@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List
 import logging
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -41,9 +42,16 @@ class TradingGameEngine:
         self.bundle = bundle
         self.rng = np.random.default_rng(seed)
         self.config = config or ModelConfig()
-        self.history = bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().tail(500).reset_index(drop=True)
+        self.reference_df = bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
+        self.history = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
         self.account = GameAccount()
         self.next_pos_id = 1
+        self.phase_cycle = ["accumulation", "manipulation", "distribution"]
+        self.phase_idx = 0
+        self.phase = self.phase_cycle[self.phase_idx]
+        self.liquidity_high = float("nan")
+        self.liquidity_low = float("nan")
+        self.fvg_targets: list[dict[str, float]] = []
 
         self.current_state = str(bundle.learned.feature_df["state"].iloc[-1]) if "state" in bundle.learned.feature_df.columns else "RANGE"
         self.pending_player_impact = 0.0  # pression prix résiduelle
@@ -73,6 +81,8 @@ class TradingGameEngine:
             self.lmap.age_and_decay(i)
             self.fvg.detect_new(feat_boot, i, state=str(r.get("state", "RANGE")), session=str(r.get("session_name", "ASIA")))
             self.fvg.update_fill(i, float(r["high"]), float(r["low"]))
+
+        self._bootstrap_history(int(self.rng.integers(200, 301)))
 
     def _push_event(self, msg: str) -> None:
         self.recent_events = ([msg] + self.recent_events)[:40]
@@ -116,6 +126,7 @@ class TradingGameEngine:
             "last_price": last_price,
             "state": self.current_state,
             "timestamp": str(self.history["datetime"].iloc[-1]),
+            "phase": self.phase,
             "recent_events": self.recent_events,
             "recent_order_participation": self.recent_order_participation,
             "recent_order_impact": self.recent_order_impact,
@@ -124,6 +135,58 @@ class TradingGameEngine:
         if errs:
             self._push_event("MONITOR: " + ",".join(errs))
         return snap
+
+    def _bootstrap_history(self, n_bars: int = 250) -> None:
+        n_bars = max(200, min(300, int(n_bars)))
+        base_price = float(self.reference_df["close"].iloc[-1])
+        base_volume = float(self.reference_df["volume"].tail(100).mean() or 1000.0)
+        tf_seconds = max(1, int(self.bundle.timeframe_seconds))
+        start_dt = datetime.now().astimezone() - pd.Timedelta(seconds=tf_seconds * n_bars)
+
+        rows = []
+        price = base_price
+        for i in range(n_bars):
+            state = str(self.bundle.learned.feature_df["state"].iloc[(i * 7) % len(self.bundle.learned.feature_df)])
+            vol_bucket = str(self.bundle.learned.feature_df["vol_regime_bucket"].iloc[(i * 11) % len(self.bundle.learned.feature_df)])
+            session = str(self.bundle.learned.feature_df["session_name"].iloc[(i * 13) % len(self.bundle.learned.feature_df)])
+            key = (state, vol_bucket, session)
+            direction, amplitude = self._direction_and_amplitude_contextual(key, state, self.bundle.learned.feature_df.iloc[-1])
+            noise = float(self.rng.normal(0.0, max(1e-5, self.bundle.learned.volatility_stats["log_return_sigma"] * 0.25)))
+            move = float(direction * amplitude + noise)
+            if self.phase == "accumulation":
+                move *= 0.45
+            elif self.phase == "distribution":
+                move *= 1.15
+            close_price = max(0.01, price * np.exp(move))
+            high = max(price, close_price) * (1 + min(0.02, abs(move) * 0.45))
+            low = min(price, close_price) * (1 - min(0.02, abs(move) * 0.45))
+            rows.append(
+                {
+                    "datetime": start_dt + pd.Timedelta(seconds=i * tf_seconds),
+                    "open": float(price),
+                    "high": float(high),
+                    "low": float(low),
+                    "close": float(close_price),
+                    "volume": float(base_volume * (1 + min(2.0, abs(move) * 120))),
+                }
+            )
+            price = close_price
+            if i % 16 == 15:
+                self._advance_phase()
+        self.history = pd.DataFrame(rows)
+        self._refresh_liquidity_zones()
+
+    def _refresh_liquidity_zones(self) -> None:
+        lookback = min(60, len(self.history))
+        if lookback <= 2:
+            return
+        tail = self.history.tail(lookback)
+        self.liquidity_high = float(tail["high"].max())
+        self.liquidity_low = float(tail["low"].min())
+
+    def _advance_phase(self) -> None:
+        self.phase_idx = (self.phase_idx + 1) % len(self.phase_cycle)
+        self.phase = self.phase_cycle[self.phase_idx]
 
     # -------- impact model --------
     def _local_executable_volume_notional(self, session: str, local_notional: float, liquidity_strength: float) -> float:
@@ -282,16 +345,55 @@ class TradingGameEngine:
         wstats = self.bundle.learned.conditional_wicks.get(key, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.08, "lower_sigma": 0.08})
 
         direction, amplitude = self._direction_and_amplitude_contextual(key, next_state, ref)
+        base_move = float(direction * amplitude)
+        sigma = float(max(1e-6, self.bundle.learned.volatility_stats["log_return_sigma"]))
+        drift = float(self.bundle.learned.volatility_stats["log_return_mu"])
+        noise = float(self.rng.normal(0.0, sigma))
 
-        amplitude += abs(self.pending_player_impact)
-        direction = np.sign(direction + np.sign(self.pending_player_impact) * min(1.0, abs(self.pending_player_impact) * 50)) or direction
+        if self.phase == "accumulation":
+            drift *= 0.35
+            noise *= 0.45
+            base_move *= 0.45
+        elif self.phase == "manipulation":
+            noise *= 0.9
+            base_move *= 0.6
+        else:  # distribution
+            noise *= 1.2
+            base_move *= 1.3
+
+        fomo_effect = 0.0
+        panic_effect = 0.0
+        if abs(base_move) > sigma * 1.2:
+            fomo_effect = base_move * float(self.rng.uniform(0.2, 0.5))
+        if base_move < -sigma * 1.4:
+            panic_effect = base_move * float(self.rng.uniform(0.5, 1.8))
+
+        player_effect = float(self.pending_player_impact)
+        liquidity_effect = 0.0
+        if self.phase == "manipulation":
+            self._refresh_liquidity_zones()
+            if self.rng.random() < 0.3 and np.isfinite(self.liquidity_high) and np.isfinite(self.liquidity_low):
+                hunt = float(self.rng.uniform(0.0003, 0.002))
+                if direction >= 0:
+                    liquidity_effect = np.log(max(0.01, self.liquidity_low * (1 - hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
+                else:
+                    liquidity_effect = np.log(max(0.01, self.liquidity_high * (1 + hunt)) / max(0.01, float(self.history["close"].iloc[-1])))
+
+        move = drift + noise + base_move + fomo_effect + panic_effect + liquidity_effect + player_effect
+        direction = int(np.sign(move) or direction)
         self.pending_player_impact *= self.config.pending_impact_decay
 
         current_price = float(self.history["close"].iloc[-1])
-        next_close = max(0.01, current_price * np.exp(direction * amplitude))
+        next_close = max(0.01, current_price * np.exp(move))
         candle_range = max(1e-8, self.rng.normal(range_stats["mu"], range_stats["sigma"]))
         high = max(current_price, next_close) + candle_range * max(0.0, self.rng.normal(wstats["upper_mu"], wstats["upper_sigma"]))
         low = min(current_price, next_close) - candle_range * max(0.0, self.rng.normal(wstats["lower_mu"], wstats["lower_sigma"]))
+
+        if self.phase == "manipulation":
+            if direction >= 0:
+                low = min(low, current_price * (1 - abs(move) * 1.2))
+            else:
+                high = max(high, current_price * (1 + abs(move) * 1.2))
 
         local_scale = float(feat["range"].tail(30).mean() or 1.0)
         liq_dist = self.lmap.nearest_distances(next_close, local_scale=max(local_scale, 1e-6))
@@ -314,8 +416,24 @@ class TradingGameEngine:
                 next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
                 self._push_event(f"STOP_CASCADE score={cascade_score:.3f}")
 
-        new_dt = pd.to_datetime(self.history["datetime"].iloc[-1], utc=True) + pd.Timedelta(seconds=self.bundle.timeframe_seconds)
-        row = {"datetime": new_dt, "open": current_price, "high": max(high, next_close), "low": min(low, next_close), "close": next_close, "volume": float(self.history["volume"].tail(50).mean() * (1 + amplitude * 8))}
+        if abs(move) > sigma * 2.2:
+            gap_low = min(current_price, next_close)
+            gap_high = max(current_price, next_close)
+            self.fvg_targets.append({"low": gap_low, "high": gap_high, "ttl": 24.0})
+        fvg_pullback = 0.0
+        if self.fvg_targets and self.rng.random() < 0.28:
+            target = self.fvg_targets[0]
+            mid = (target["low"] + target["high"]) / 2.0
+            fvg_pullback = (mid - next_close) * 0.18
+            next_close = max(0.01, next_close + fvg_pullback)
+            high = max(high, next_close)
+            low = min(low, next_close)
+            target["ttl"] -= 1.0
+            if target["ttl"] <= 0:
+                self.fvg_targets.pop(0)
+
+        new_dt = datetime.now().astimezone()
+        row = {"datetime": new_dt, "open": current_price, "high": max(high, next_close), "low": min(low, next_close), "close": next_close, "volume": float(self.history["volume"].tail(50).mean() * (1 + abs(move) * 8))}
         errs = validate_ohlc(row)
         if errs:
             self._push_event("MONITOR_OHLC: " + ",".join(errs))
@@ -329,8 +447,15 @@ class TradingGameEngine:
         self.fvg.update_fill(len(self.history), row["high"], row["low"])
 
         self.current_state = next_state
+        if self.phase == "accumulation" and abs(move) > sigma * 1.15:
+            self._advance_phase()
+        elif self.phase == "manipulation":
+            self._advance_phase()
+        elif self.phase == "distribution" and abs(move) < sigma * 0.9:
+            self._advance_phase()
+        self._refresh_liquidity_zones()
         self._enforce_liquidation_if_needed()
-        return {"ok": True, "candle": row, "state": next_state, "sweep": sweep, "snapshot": self.snapshot()}
+        return {"ok": True, "candle": row, "state": next_state, "phase": self.phase, "sweep": sweep, "snapshot": self.snapshot()}
 
     def reset(self) -> Dict[str, object]:
         learned_bundle = self.bundle

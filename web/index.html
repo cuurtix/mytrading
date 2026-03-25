@@ -21,7 +21,6 @@
         <button id="btnRun">RUN</button>
         <button id="btnPause">PAUSE</button>
         <button id="recenter">RECENTER</button>
-        <label>Vitesse(ms): <input id="speed" type="number" value="500" min="50" step="50" /></label>
       </div>
       <div id="events" class="events"></div>
     </section>
@@ -50,7 +49,11 @@
 
     <section class="panel">
       <h2>Portefeuille temps réel</h2>
-      <pre id="metrics"></pre>
+      <div class="portfolio-box">
+        <div class="row"><span>Balance</span><span id="balance"></span></div>
+        <div class="row"><span>Equity</span><span id="equity"></span></div>
+        <div class="row"><span>PnL</span><span id="pnl"></span></div>
+      </div>
       <h3>Positions</h3>
       <div id="positions"></div>
     </section>
