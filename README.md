@@ -7,6 +7,7 @@ Le projet est maintenant un **jeu local jouable** avec interface principale en *
 - **Frontend local**: `web/index.html`, `web/style.css`, `web/app.js`
 - **Backend local Python**: `game_server.py`
 - **Moteur**: ingestion + apprentissage structurel + transitions contextuelles + simulation incrémentale
+- **Configuration moteur**: `src/model_config.py` (centralisation des paramètres impact/liquidité/cascade/FVG)
 
 Pourquoi cette architecture:
 - garde la puissance du moteur Python existant,
@@ -49,6 +50,8 @@ En pratique:
 - petits ordres => spread/slippage très faibles, pas de cascade artificielle,
 - ordres plus gros vs liquidité locale => impact plus visible,
 - impact borné et pression prix résiduelle décroissante pour préserver la stabilité.
+
+La configuration associée est centralisée dans `ModelConfig` pour éviter les règles magiques dispersées.
 
 ## Lancer le jeu local
 

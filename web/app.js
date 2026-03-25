@@ -31,6 +31,13 @@ function refreshFromSnapshot(snap){
   if(!snap) return;
   renderMetrics(snap.metrics);
   renderPositions(snap.positions || []);
+  if(Array.isArray(snap.recent_events)){
+    const el = document.getElementById('events');
+    el.innerHTML = snap.recent_events.map(e => `<div>${e}</div>`).join('');
+  }
+  if(snap.state && snap.last_price !== undefined){
+    document.getElementById('status').textContent = `state=${snap.state} last=${Number(snap.last_price).toFixed(2)}`;
+  }
 }
 
 async function step(){
@@ -51,7 +58,7 @@ async function init(){
   labels.length = 0; prices.length = 0;
   (d.initial_candles || []).forEach(c => { labels.push(c.datetime); prices.push(c.close); });
   chart.update();
-  refreshFromSnapshot({metrics:d.metrics, positions:d.positions});
+  refreshFromSnapshot(d.snapshot || d);
 }
 
 function runLoop(){

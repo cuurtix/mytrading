@@ -24,6 +24,14 @@ def test_liquidity_zone_persistence_and_sweep():
     assert z2.active is False
 
 
+def test_nearest_liquidity_strength_is_local_not_global_max():
+    lm = LiquidityMap(zone_width_bps=5)
+    lm.add_or_touch_zone(0, 100.0, "swing_high", "buy_side", 0.4)
+    lm.add_or_touch_zone(1, 130.0, "swing_high", "buy_side", 2.0)
+    d = lm.nearest_distances(100.1, local_scale=1.0)
+    assert d["nearest_liquidity_strength"] < 1.0
+
+
 def test_fvg_lifecycle_fill_ratio():
     df = pd.DataFrame({"high": [100, 101, 102, 103], "low": [99, 100, 101.5, 102]})
     book = FVGBook()

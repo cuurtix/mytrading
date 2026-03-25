@@ -49,5 +49,7 @@ def test_api_init_returns_initial_candles_and_snapshot_keys():
     assert data["ok"] is True
     assert "initial_candles" in data
     assert len(data["initial_candles"]) > 0
+    assert "snapshot" in data
     for k in ['metrics', 'positions', 'last_price', 'state', 'timestamp', 'recent_events']:
         assert k in data
+        assert k in data["snapshot"]

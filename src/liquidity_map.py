@@ -127,13 +127,18 @@ class LiquidityMap:
 
     def nearest_distances(self, price: float, local_scale: float = 1.0) -> Dict[str, float]:
         scale = max(local_scale, 1e-8)
-        buy = [abs(price - z.price_level) / scale for z in self.zones if z.active and z.side == "buy_side"]
-        sell = [abs(price - z.price_level) / scale for z in self.zones if z.active and z.side == "sell_side"]
-        strengths = [z.strength for z in self.zones if z.active]
+        active = [z for z in self.zones if z.active]
+        buy = [abs(price - z.price_level) / scale for z in active if z.side == "buy_side"]
+        sell = [abs(price - z.price_level) / scale for z in active if z.side == "sell_side"]
+        if active:
+            nearest_zone = min(active, key=lambda z: abs(price - z.price_level))
+            nearest_strength = float(nearest_zone.strength)
+        else:
+            nearest_strength = 0.0
         return {
             "distance_to_nearest_buy_liquidity": float(min(buy) if buy else np.nan),
             "distance_to_nearest_sell_liquidity": float(min(sell) if sell else np.nan),
-            "nearest_liquidity_strength": float(max(strengths) if strengths else 0.0),
+            "nearest_liquidity_strength": nearest_strength,
         }
 
 

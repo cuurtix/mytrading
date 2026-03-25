@@ -49,12 +49,13 @@ def _breakout_ctx(row: pd.Series) -> str:
 def infer_market_states(features_df: pd.DataFrame) -> pd.DataFrame:
     out = features_df.copy()
     out["state"] = "RANGE"
+    compression_q70 = float(out["compression_score"].quantile(0.7))
 
     for i, row in out.iterrows():
         state = "RANGE"
         if row["vol_regime_bucket"] == "HIGH" and row["expansion_score"] > 1.7:
             state = "HIGH_VOLATILITY_PANIC"
-        elif row["vol_regime_bucket"] == "LOW" and row["compression_score"] > out["compression_score"].quantile(0.7):
+        elif row["vol_regime_bucket"] == "LOW" and row["compression_score"] > compression_q70:
             state = "LOW_VOLATILITY_COMPRESSION"
         elif row.get("recent_sweep_flag", 0) and row.get("breakout_rejected", False):
             state = "POST_SWEEP_REVERSAL"

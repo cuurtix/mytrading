@@ -11,6 +11,7 @@ from src.feature_engineering import add_market_features
 from src.fvg_engine import FVGBook
 from src.liquidity_map import LiquidityMap
 from src.logic_monitor import VALID_SESSIONS, validate_ohlc, validate_snapshot
+from src.model_config import ModelConfig
 from src.sessions import xauusd_session_name
 from src.state_engine import sample_next_state
 
@@ -33,11 +34,11 @@ class GameAccount:
 
 class TradingGameEngine:
     maintenance_margin_ratio: float = 0.5
-    GLOBAL_GOLD_REFERENCE_DAILY_NOTIONAL: float = 3.27e11
 
-    def __init__(self, bundle: CalibrationBundle, seed: int = 11):
+    def __init__(self, bundle: CalibrationBundle, seed: int = 11, config: ModelConfig | None = None):
         self.bundle = bundle
         self.rng = np.random.default_rng(seed)
+        self.config = config or ModelConfig()
         self.history = bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().tail(500).reset_index(drop=True)
         self.account = GameAccount()
         self.next_pos_id = 1
@@ -117,28 +118,29 @@ class TradingGameEngine:
     # -------- impact model --------
     def _local_executable_volume_notional(self, session: str, local_notional: float, liquidity_strength: float) -> float:
         session_mult = {"ASIA": 0.8, "LONDON_OPEN": 1.15, "NEW_YORK": 1.25, "LATE_SESSION": 0.7}.get(session, 1.0)
-        liq_capacity = max(5e5, liquidity_strength * 8e6)
-        return max(2e5, session_mult * (0.7 * local_notional + 0.3 * liq_capacity))
+        liq_capacity = max(self.config.min_liquidity_capacity, liquidity_strength * self.config.liquidity_strength_to_notional)
+        local_exec = session_mult * (self.config.local_volume_weight * local_notional + self.config.liquidity_capacity_weight * liq_capacity)
+        return max(self.config.min_local_executable_notional, local_exec)
 
     def _global_market_reference_notional(self) -> float:
-        return float(self.GLOBAL_GOLD_REFERENCE_DAILY_NOTIONAL)  # garde-fou macro configurable, pas le driver principal gameplay
+        return float(self.config.global_gold_reference_daily_notional)  # garde-fou macro configurable, pas le driver principal gameplay
 
     def _compute_order_impact(self, side: str, order_notional: float, local_executable_notional: float, sigma_local: float) -> Dict[str, float]:
         effective_participation = order_notional / max(local_executable_notional, 1e-8)
         macro_guardrail = order_notional / max(self._global_market_reference_notional(), 1e-8)
 
-        activation_threshold = 5e-6
+        activation_threshold = self.config.impact_activation_threshold
         if effective_participation < activation_threshold:
             impact = 0.0
         else:
             sign = 1.0 if side == "buy" else -1.0
-            Y = 0.55
+            Y = self.config.impact_y
             raw = sign * Y * max(sigma_local, 1e-6) * np.sqrt(effective_participation)
             raw *= (1.0 - min(0.6, np.sqrt(macro_guardrail)))
-            impact = float(np.clip(raw, -0.02, 0.02))
+            impact = float(np.clip(raw, -self.config.impact_clip_abs, self.config.impact_clip_abs))
 
         # Corrélations participation -> spread/slippage
-        spread_widen = float(min(1.0, np.sqrt(effective_participation) * (1 + sigma_local * 10) * 0.45))
+        spread_widen = float(min(1.0, np.sqrt(effective_participation) * (1 + sigma_local * 10) * self.config.spread_participation_multiplier))
         slippage = float(abs(impact) * (1.0 + spread_widen + sigma_local * 8))
         return {
             "impact": impact,
@@ -251,7 +253,7 @@ class TradingGameEngine:
 
         amplitude += abs(self.pending_player_impact)
         direction = np.sign(direction + np.sign(self.pending_player_impact) * min(1.0, abs(self.pending_player_impact) * 50)) or direction
-        self.pending_player_impact *= 0.5
+        self.pending_player_impact *= self.config.pending_impact_decay
 
         current_price = float(self.history["close"].iloc[-1])
         next_close = max(0.01, current_price * np.exp(direction * amplitude))
@@ -261,6 +263,11 @@ class TradingGameEngine:
 
         local_scale = float(feat["range"].tail(30).mean() or 1.0)
         liq_dist = self.lmap.nearest_distances(next_close, local_scale=max(local_scale, 1e-6))
+        fvg_dist = self.fvg.nearest_open_distance(next_close)
+        fvg_dist_rel = fvg_dist / max(local_scale, 1e-8) if not np.isnan(fvg_dist) else np.nan
+        near_fvg = bool(not np.isnan(fvg_dist_rel) and fvg_dist_rel <= self.config.fvg_rebalance_distance_threshold)
+        if near_fvg and next_state == "REBALANCING_TO_FVG":
+            next_close = max(0.01, current_price + (next_close - current_price) * self.config.fvg_rebalance_damping)
         sweep = self.lmap.detect_sweep(len(self.history), high, low, next_close)
 
         # sweep/cascade conditionnelle corrélée participation/liquidité/état/vol
@@ -268,10 +275,10 @@ class TradingGameEngine:
         breakout_score = 1.0 if next_state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN"} else 0.0
         vol_score = 1.0 if next_state == "HIGH_VOLATILITY_PANIC" else 0.4
         sweep_trigger_score = 0.35 * proximity_score + 0.35 * min(1.0, self.recent_order_participation * 2000) + 0.2 * breakout_score + 0.1 * vol_score
-        if sweep["recent_sweep_flag"] and sweep_trigger_score > 0.55:
+        if sweep["recent_sweep_flag"] and sweep_trigger_score > self.config.sweep_trigger_threshold:
             cascade_score = 0.5 * sweep["recent_sweep_strength"] + 0.25 * breakout_score + 0.2 * min(1.0, self.recent_order_participation * 2000) + 0.05 * vol_score
-            if cascade_score > 0.45:
-                cascade = min(0.004, cascade_score * 0.002)
+            if cascade_score > self.config.cascade_trigger_threshold:
+                cascade = min(self.config.cascade_cap, cascade_score * self.config.cascade_multiplier)
                 next_close = max(0.01, next_close * (1 + (1 if sweep["recent_sweep_side"] == -1 else -1) * cascade))
                 self._push_event(f"STOP_CASCADE score={cascade_score:.3f}")
 
