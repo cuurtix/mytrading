@@ -33,6 +33,7 @@ class GameAccount:
 
 class TradingGameEngine:
     maintenance_margin_ratio: float = 0.5
+    GLOBAL_GOLD_REFERENCE_DAILY_NOTIONAL: float = 3.27e11
 
     def __init__(self, bundle: CalibrationBundle, seed: int = 11):
         self.bundle = bundle
@@ -120,7 +121,7 @@ class TradingGameEngine:
         return max(2e5, session_mult * (0.7 * local_notional + 0.3 * liq_capacity))
 
     def _global_market_reference_notional(self) -> float:
-        return 361e9  # garde-fou macro, pas le driver principal gameplay
+        return float(self.GLOBAL_GOLD_REFERENCE_DAILY_NOTIONAL)  # garde-fou macro configurable, pas le driver principal gameplay
 
     def _compute_order_impact(self, side: str, order_notional: float, local_executable_notional: float, sigma_local: float) -> Dict[str, float]:
         effective_participation = order_notional / max(local_executable_notional, 1e-8)

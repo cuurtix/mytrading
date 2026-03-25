@@ -37,9 +37,13 @@ def test_fee_debited_on_open_once_and_partial_close():
 def test_rejected_order_has_no_market_impact():
     e = _engine()
     p0 = e.pending_player_impact
+    part0 = e.recent_order_participation
+    imp0 = e.recent_order_impact
     r = e.place_order('buy', size=10_000_000)
     assert r['ok'] is False
     assert e.pending_player_impact == p0
+    assert e.recent_order_participation == part0
+    assert e.recent_order_impact == imp0
 
 
 def test_impact_small_vs_large_order():
@@ -47,6 +51,8 @@ def test_impact_small_vs_large_order():
     small = e.place_order('buy', size=0.01)
     large = e.place_order('buy', size=20)
     assert abs(small['execution']['impact']) <= abs(large['execution']['impact'])
+    assert small['execution']['spread_widen'] <= large['execution']['spread_widen']
+    assert small['execution']['slippage'] <= large['execution']['slippage']
 
 
 def test_snapshot_complete_and_state_progresses():

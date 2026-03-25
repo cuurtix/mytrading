@@ -38,12 +38,17 @@ Le cœur data-driven est conservé:
 
 ## Impact du joueur sur le marché
 
-Les ordres du joueur influencent:
-- impact prix,
-- spread,
-- slippage,
-- probabilité d’impulsion,
-- interactions sweep/stop-hunt (cascade).
+Les ordres du joueur **n’impactent pas systématiquement** le marché.
+
+Le moteur applique une loi d’impact bornée de type square-root, avec:
+- seuil d’activation (petits ordres => impact nul/quasi nul),
+- participation relative à la **liquidité locale exécutable**,
+- garde-fou macro configurable pour éviter des extrêmes non réalistes.
+
+En pratique:
+- petits ordres => spread/slippage très faibles, pas de cascade artificielle,
+- ordres plus gros vs liquidité locale => impact plus visible,
+- impact borné et pression prix résiduelle décroissante pour préserver la stabilité.
 
 ## Lancer le jeu local
 
@@ -70,3 +75,9 @@ Note: CLOSE 10% / 20% / 50% applique ce pourcentage sur **chaque position ouvert
 - liquidation forcée si equity <= maintenance margin
 
 Les endpoints API renvoient un snapshot complet après chaque action (metrics, positions, last_price, state, timestamp, recent_events).
+
+## Détail de la référence macro or (garde-fou)
+
+- Référence configurable: `GLOBAL_GOLD_REFERENCE_DAILY_NOTIONAL = 3.27e11` (USD/jour, ordre de grandeur global).
+- Cette référence sert uniquement de **garde-fou macro**.
+- Le gameplay est piloté d’abord par la liquidité locale (session + volume local + carte de liquidité), pas par ce volume macro.
