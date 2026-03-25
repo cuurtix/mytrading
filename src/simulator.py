@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from src.behavior_learning import LearnedBehavior
+from src.feature_engineering import add_market_features
 from src.fvg_engine import FVGBook
 from src.liquidity_map import LiquidityMap
 from src.state_engine import sample_next_state
@@ -22,33 +23,26 @@ class SyntheticMarketSimulator:
         self.learned = learned
         self.timeframe_seconds = timeframe_seconds
 
-    def _direction_and_amplitude(self, state: str, ctx: pd.Series, rng: np.random.Generator) -> tuple[int, float]:
-        rstats = self.learned.conditional_returns.get(state, {"mu": 0.0, "sigma": self.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
+    def _direction_and_amplitude(self, key3: tuple[str, str, str], state: str, ctx: pd.Series, rng: np.random.Generator) -> tuple[int, float]:
+        rstats = self.learned.conditional_returns.get(key3, {"mu": 0.0, "sigma": self.learned.volatility_stats["log_return_sigma"], "cont_3": 0.5})
         sampled = rng.normal(rstats["mu"], rstats["sigma"])
-
         direction = 1 if sampled >= 0 else -1
         amplitude = abs(sampled)
 
-        # contexte sweep / breakout / FVG
         if ctx.get("recent_sweep_flag", 0) == 1:
-            if ctx.get("recent_sweep_side", 0) == 1:
-                continuation = self.learned.sweep_stats.get("continuation_after_sweep_buy", 0.5)
-            else:
-                continuation = self.learned.sweep_stats.get("continuation_after_sweep_sell", 0.5)
-            if rng.random() > continuation:
+            cont = self.learned.sweep_stats.get("continuation_after_sweep_buy", 0.5) if ctx.get("recent_sweep_side", 0) == 1 else self.learned.sweep_stats.get("continuation_after_sweep_sell", 0.5)
+            if rng.random() > cont:
                 direction *= -1
-            amplitude *= 1.0 + min(1.0, float(ctx.get("recent_sweep_strength", 0.0)) * 10)
+            amplitude *= 1.0 + min(1.0, float(ctx.get("recent_sweep_strength", 0.0)) * 8)
 
         if state in {"BREAKOUT_ACCEPTED", "EXPANSION_UP", "EXPANSION_DOWN"}:
-            fomo_amp = min(1.8, 1.0 + rstats.get("cont_3", 0.5))
-            amplitude *= fomo_amp
+            amplitude *= min(1.8, 1.0 + rstats.get("cont_3", 0.5))
         if state in {"BREAKOUT_REJECTED", "POST_SWEEP_REVERSAL"}:
             direction *= -1
             amplitude *= 0.8
 
-        if ctx.get("distance_to_nearest_open_fvg", 9999.0) < ctx.get("range", 1.0):
+        if ctx.get("distance_to_nearest_open_fvg", 9.0) < 1.0:
             amplitude *= 0.9
-
         return direction, max(1e-7, amplitude)
 
     def run(self, history_df: pd.DataFrame, cfg: SimulationConfig) -> pd.DataFrame:
@@ -56,61 +50,55 @@ class SyntheticMarketSimulator:
             raise ValueError("historique vide")
 
         rng = np.random.default_rng(cfg.seed)
-        last = history_df.iloc[-1]
-        current_price = float(last["close"])
-        ts = pd.to_datetime(last["datetime"], utc=True)
+        hist = history_df[["datetime", "open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
         current_state = str(self.learned.feature_df["state"].iloc[-1]) if "state" in self.learned.feature_df.columns else "RANGE"
 
+        # Build persistent maps from recent learned history (structure-based)
+        base_feat = add_market_features(hist.tail(300).copy())
         lmap = LiquidityMap()
-        fvg_book = FVGBook()
+        fvg = FVGBook()
+        roll_h = base_feat["high"].rolling(30, min_periods=5).max()
+        roll_l = base_feat["low"].rolling(30, min_periods=5).min()
+        for i, r in base_feat.iterrows():
+            lmap.ingest_feature_row(i, r, roll_h.iloc[i], roll_l.iloc[i])
+            lmap.detect_sweep(i, float(r["high"]), float(r["low"]), float(r["close"]))
+            lmap.age_and_decay(i)
+            fvg.detect_new(base_feat, i, state=r.get("trend_context", ""), session=r.get("session_name", ""))
+            fvg.update_fill(i, float(r["high"]), float(r["low"]))
 
         out = []
-        for i in range(cfg.n_steps):
-            if out:
-                ref = pd.Series(out[-1])
-            else:
-                ref = self.learned.feature_df.iloc[-1].copy()
-
+        for step in range(cfg.n_steps):
+            feat_recent = add_market_features(hist.tail(300).copy())
+            ref = feat_recent.iloc[-1]
             next_state = sample_next_state(current_state, ref, self.learned.transition_model.transition_probs, rng)
-            direction, amplitude = self._direction_and_amplitude(next_state, ref, rng)
 
             vol_bucket = str(ref.get("vol_regime_bucket", "NORMAL"))
-            session = str(ref.get("session_name", "LONDON"))
-            range_stats = self.learned.transition_model.state_range_stats.get(
-                (next_state, vol_bucket, session),
-                {"mu": self.learned.volatility_stats["range_mean"], "sigma": self.learned.volatility_stats["range_mean"] * 0.3},
-            )
-            wstats = self.learned.conditional_wicks.get(next_state, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.07, "lower_sigma": 0.07})
+            session = str(ref.get("session_name", "LONDON_OPEN"))
+            key3 = (next_state, vol_bucket, session)
+            direction, amplitude = self._direction_and_amplitude(key3, next_state, ref, rng)
 
-            log_ret = direction * amplitude
-            next_close = max(0.01, current_price * np.exp(log_ret))
+            range_stats = self.learned.conditional_ranges.get(key3, {"mu": self.learned.volatility_stats["range_mean"], "sigma": self.learned.volatility_stats["range_mean"] * 0.3})
+            wstats = self.learned.conditional_wicks.get(key3, {"upper_mu": 0.25, "lower_mu": 0.25, "upper_sigma": 0.07, "lower_sigma": 0.07})
+
+            current_price = float(hist["close"].iloc[-1])
+            next_close = max(0.01, current_price * np.exp(direction * amplitude))
             candle_range = max(1e-8, rng.normal(range_stats["mu"], range_stats["sigma"]))
-            wick_up = max(0.0, rng.normal(wstats["upper_mu"], wstats["upper_sigma"]))
-            wick_dn = max(0.0, rng.normal(wstats["lower_mu"], wstats["lower_sigma"]))
+            high = max(current_price, next_close) + candle_range * max(0.0, rng.normal(wstats["upper_mu"], wstats["upper_sigma"]))
+            low = min(current_price, next_close) - candle_range * max(0.0, rng.normal(wstats["lower_mu"], wstats["lower_sigma"]))
 
-            high = max(current_price, next_close) + candle_range * wick_up
-            low = min(current_price, next_close) - candle_range * wick_dn
+            local_scale = float(feat_recent["range"].tail(30).mean() or 1.0)
+            liq_dist = lmap.nearest_distances(next_close, local_scale=local_scale)
+            sweep = lmap.detect_sweep(step + len(base_feat), high, low, next_close)
+            dist_fvg = fvg.nearest_open_distance(next_close)
 
-            # update contextual objects
-            lmap.add_or_touch_zone(i, high, "synthetic_high", "buy_side", strength=0.5)
-            lmap.add_or_touch_zone(i, low, "synthetic_low", "sell_side", strength=0.5)
-            sweep = lmap.detect_sweep(i, high, low, next_close)
-            liq_dist = lmap.nearest_distances(next_close)
-            lmap.age_and_decay(i)
-
-            temp_df = pd.DataFrame([{"high": high, "low": low}])
-            fvg_book.detect_new(pd.concat([history_df[["high", "low"]].tail(2), temp_df], ignore_index=True), 2, state=next_state, session=session)
-            fvg_book.update_fill(i, high, low)
-            dist_fvg = fvg_book.nearest_open_distance(next_close)
-
-            ts = ts + pd.Timedelta(seconds=self.timeframe_seconds)
-            row = {
-                "datetime": ts,
+            new_dt = pd.to_datetime(hist["datetime"].iloc[-1], utc=True) + pd.Timedelta(seconds=self.timeframe_seconds)
+            new_row = {
+                "datetime": new_dt,
                 "open": current_price,
                 "high": high,
                 "low": low,
                 "close": next_close,
-                "volume": float(history_df["volume"].mean() * (1 + amplitude * 10)),
+                "volume": float(hist["volume"].mean() * (1 + amplitude * 10)),
                 "state": next_state,
                 "direction": direction,
                 "amplitude": amplitude,
@@ -121,13 +109,21 @@ class SyntheticMarketSimulator:
                 "distance_to_nearest_buy_liquidity": liq_dist["distance_to_nearest_buy_liquidity"],
                 "distance_to_nearest_sell_liquidity": liq_dist["distance_to_nearest_sell_liquidity"],
                 "nearest_liquidity_strength": liq_dist["nearest_liquidity_strength"],
-                "distance_to_nearest_open_fvg": dist_fvg if not np.isnan(dist_fvg) else candle_range * 3,
+                "distance_to_nearest_open_fvg": (dist_fvg / max(local_scale, 1e-8)) if not np.isnan(dist_fvg) else 3.0,
                 "vol_regime_bucket": vol_bucket,
                 "session_name": session,
             }
-            out.append(row)
+            out.append(new_row)
+
+            hist = pd.concat([hist, pd.DataFrame([{k: new_row[k] for k in ["datetime", "open", "high", "low", "close", "volume"]}])], ignore_index=True)
+            feat_new = add_market_features(hist.tail(60).copy()).iloc[-1]
+            lmap.ingest_feature_row(step + len(base_feat), feat_new, rolling_high=float(hist["high"].tail(30).max()), rolling_low=float(hist["low"].tail(30).min()))
+            lmap.age_and_decay(step + len(base_feat))
+            tmp = pd.DataFrame([{"high": high, "low": low}])
+            fvg.detect_new(pd.concat([hist[["high", "low"]].tail(2), tmp], ignore_index=True), 2, state=next_state, session=session)
+            fvg.update_fill(step + len(base_feat), high, low)
+
             current_state = next_state
-            current_price = next_close
 
         sim = pd.DataFrame(out)
         sim["breakout_up"] = sim["close"] > sim["high"].rolling(20, min_periods=5).max().shift(1)

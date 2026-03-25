@@ -49,7 +49,7 @@ Le moteur extrait des features structurelles (`src/feature_engineering.py`, `src
 
 `src/state_engine.py` apprend des transitions **contextuelles** :
 
-`P(S_{t+1} | S_t, X_t)`
+`P(S_{t+1} | S_t, vol_bucket, liquidity_rel_bucket, breakout_ctx, sweep_ctx, session)`
 
 avec contexte (vol bucket, proximité liquidité, breakout/sweep, session, etc.).
 
@@ -83,7 +83,11 @@ avec contexte (vol bucket, proximité liquidité, breakout/sweep, session, etc.)
 - visualisation des états et stats conditionnelles,
 - simulation calibrée.
 
-## 9) Limites assumées
+## 9) Sessions XAUUSD
+
+La logique de session est explicitement référencée en timezone **UTC** (ASIA, LONDON_OPEN, NEW_YORK, LATE_SESSION).
+
+## 10) Limites assumées
 
 - Modèle explicite et statistique (pas de microstructure tick-level réelle).
 - Les transitions sont conditionnelles par buckets (interprétables), pas modèle profond.

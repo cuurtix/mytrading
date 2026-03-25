@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 
 from pathlib import Path
 import zipfile
@@ -8,6 +9,7 @@ import pandas as pd
 from src.data_ingestion import detect_timeframe_seconds, read_zip_datasets, sanitize_ohlc
 
 
+@pytest.mark.skipif(__import__("importlib").util.find_spec("openpyxl") is None, reason="openpyxl non installé")
 def test_ingestion_zip_with_xlsx(tmp_path: Path):
     df = pd.DataFrame(
         {

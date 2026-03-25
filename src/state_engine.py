@@ -28,12 +28,12 @@ class TransitionModel:
     state_range_stats: Dict[Tuple[str, str, str], Dict[str, float]]
 
 
-def _bucket_liquidity(x: float) -> str:
-    if pd.isna(x):
+def _bucket_liquidity(x_rel: float) -> str:
+    if pd.isna(x_rel):
         return "UNK"
-    if x < 0.5:
+    if x_rel < 0.75:
         return "NEAR"
-    if x < 2.0:
+    if x_rel < 2.5:
         return "MID"
     return "FAR"
 
@@ -79,7 +79,8 @@ def infer_market_states(features_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_transition_key(state: str, row: pd.Series) -> Tuple[str, str, str, str, str, str]:
     vol_bucket = str(row.get("vol_regime_bucket", "UNK"))
-    liq_bucket = _bucket_liquidity(float(row.get("distance_to_nearest_buy_liquidity", np.nan)))
+    liq_rel = min(float(row.get("distance_to_nearest_buy_liquidity", np.nan)), float(row.get("distance_to_nearest_sell_liquidity", np.nan)))
+    liq_bucket = _bucket_liquidity(liq_rel)
     breakout_bucket = _breakout_ctx(row)
     sweep_bucket = "SWEEP" if row.get("recent_sweep_flag", 0) else "NO_SWEEP"
     session = str(row.get("session_name", "UNK"))

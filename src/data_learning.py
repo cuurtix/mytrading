@@ -6,7 +6,7 @@ from typing import Dict, List
 import pandas as pd
 
 from src.behavior_learning import LearnedBehavior, learn_behavior
-from src.data_ingestion import IngestionReport, merge_compatible_datasets, scan_data_sources
+from src.data_ingestion import IngestionReport, detect_timeframe_seconds, merge_compatible_datasets, scan_data_sources
 
 
 @dataclass
@@ -26,8 +26,7 @@ def learn_from_report(report: IngestionReport) -> CalibrationBundle:
     if merged.empty:
         raise ValueError("Aucun dataset compatible (timeframe)")
 
-    tf_seconds = report.datasets[0].timeframe_seconds
-    tf_label = report.datasets[0].timeframe_label
+    tf_seconds, tf_label = detect_timeframe_seconds(merged["datetime"])
     learned = learn_behavior(merged)
 
     logs = list(report.logs)

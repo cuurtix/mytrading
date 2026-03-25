@@ -69,6 +69,21 @@ class LiquidityMap:
         self.zones.append(zone)
         return zone
 
+    def ingest_feature_row(self, idx: int, row: pd.Series, rolling_high: float | None = None, rolling_low: float | None = None) -> None:
+        if bool(row.get("equal_high", False)):
+            self.add_or_touch_zone(idx, float(row["high"]), "equal_high", "buy_side", strength=1.0)
+        if bool(row.get("equal_low", False)):
+            self.add_or_touch_zone(idx, float(row["low"]), "equal_low", "sell_side", strength=1.0)
+        if bool(row.get("swing_high", False)):
+            self.add_or_touch_zone(idx, float(row["high"]), "swing_high", "buy_side", strength=1.2)
+        if bool(row.get("swing_low", False)):
+            self.add_or_touch_zone(idx, float(row["low"]), "swing_low", "sell_side", strength=1.2)
+
+        if rolling_high is not None and not np.isnan(rolling_high):
+            self.add_or_touch_zone(idx, float(rolling_high), "range_high", "buy_side", strength=0.7)
+        if rolling_low is not None and not np.isnan(rolling_low):
+            self.add_or_touch_zone(idx, float(rolling_low), "range_low", "sell_side", strength=0.7)
+
     def age_and_decay(self, idx: int, decay: float = 0.995, deactivate_age: int = 500) -> None:
         for z in self.zones:
             z.age = idx - z.first_seen_index
@@ -110,9 +125,10 @@ class LiquidityMap:
             "recent_sweep_strength": float(strength),
         }
 
-    def nearest_distances(self, price: float) -> Dict[str, float]:
-        buy = [abs(price - z.price_level) for z in self.zones if z.active and z.side == "buy_side"]
-        sell = [abs(price - z.price_level) for z in self.zones if z.active and z.side == "sell_side"]
+    def nearest_distances(self, price: float, local_scale: float = 1.0) -> Dict[str, float]:
+        scale = max(local_scale, 1e-8)
+        buy = [abs(price - z.price_level) / scale for z in self.zones if z.active and z.side == "buy_side"]
+        sell = [abs(price - z.price_level) / scale for z in self.zones if z.active and z.side == "sell_side"]
         strengths = [z.strength for z in self.zones if z.active]
         return {
             "distance_to_nearest_buy_liquidity": float(min(buy) if buy else np.nan),
@@ -127,21 +143,7 @@ def build_liquidity_map(df: pd.DataFrame) -> LiquidityMap:
     rolling_low = df["low"].rolling(30, min_periods=5).min()
 
     for i, row in df.iterrows():
-        if pd.notna(row.get("equal_high", False)) and bool(row.get("equal_high", False)):
-            lm.add_or_touch_zone(i, float(row["high"]), "equal_high", "buy_side", strength=1.0)
-        if pd.notna(row.get("equal_low", False)) and bool(row.get("equal_low", False)):
-            lm.add_or_touch_zone(i, float(row["low"]), "equal_low", "sell_side", strength=1.0)
-
-        if bool(row.get("swing_high", False)):
-            lm.add_or_touch_zone(i, float(row["high"]), "swing_high", "buy_side", strength=1.2)
-        if bool(row.get("swing_low", False)):
-            lm.add_or_touch_zone(i, float(row["low"]), "swing_low", "sell_side", strength=1.2)
-
-        if pd.notna(rolling_high.iloc[i]):
-            lm.add_or_touch_zone(i, float(rolling_high.iloc[i]), "range_high", "buy_side", strength=0.7)
-        if pd.notna(rolling_low.iloc[i]):
-            lm.add_or_touch_zone(i, float(rolling_low.iloc[i]), "range_low", "sell_side", strength=0.7)
-
+        lm.ingest_feature_row(i, row, rolling_high.iloc[i], rolling_low.iloc[i])
         lm.age_and_decay(i)
 
     return lm

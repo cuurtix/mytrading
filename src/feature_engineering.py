@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from src.market_structure import add_impulse_retracement_features, detect_swings_hierarchical, structure_labels_from_swings
+from src.sessions import xauusd_session_name
 
 
 def detect_swings(df: pd.DataFrame, left: int = 2, right: int = 2) -> pd.DataFrame:
@@ -91,7 +92,7 @@ def add_market_features(df: pd.DataFrame) -> pd.DataFrame:
 
     out["distance_to_recent_swing_high"] = out["high"].rolling(30, min_periods=5).max() - out["close"]
     out["distance_to_recent_swing_low"] = out["close"] - out["low"].rolling(30, min_periods=5).min()
-    out["session_name"] = out["datetime"].dt.hour.map(lambda h: "ASIA" if h < 8 else "LONDON" if h < 16 else "NEW_YORK")
+    out["session_name"] = out["datetime"].apply(xauusd_session_name)
 
     q1 = out["realized_vol"].quantile(0.33)
     q2 = out["realized_vol"].quantile(0.66)

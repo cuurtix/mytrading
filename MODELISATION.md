@@ -15,6 +15,7 @@
 - Features impulse/retracement/compression/expansion.
 
 ## Carte de liquidité
+Zones construites strictement **incrémentalement** (pas d'accès futur).
 Zones persistantes avec cycle de vie:
 - id, bornes, type, side, strength,
 - touch_count, age, active,
@@ -46,7 +47,7 @@ Attribution basée sur structure récente + sweep/FVG + vol + breakout + session
 ## Transitions conditionnelles
 Apprentissage de:
 
-`P(S_{t+1}|S_t, vol_bucket, liquidity_bucket, breakout_ctx, sweep_ctx, session)`
+`P(S_{t+1}|S_t, vol_bucket, liquidity_rel_bucket, breakout_ctx, sweep_ctx, session)`
 
 Ce n’est plus seulement `P(S_{t+1}|S_t)`.
 
@@ -69,3 +70,7 @@ Apprentissage explicite des distributions:
 6. conserver le timeframe source.
 
 FOMO est implémenté comme amplification contextuelle bornée (breakout/expansion), jamais comme terme additif magique constant.
+
+
+## Session de référence
+Sessions XAUUSD calculées en timezone UTC explicite.

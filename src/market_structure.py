@@ -11,9 +11,9 @@ import pandas as pd
 class SwingPoint:
     idx: int
     price: float
-    kind: str  # high/low
+    kind: str
     strength: float
-    level: str  # minor/major
+    level: str
 
 
 def detect_swings_hierarchical(df: pd.DataFrame, window_minor: int = 2, window_major: int = 5) -> List[SwingPoint]:
@@ -28,10 +28,12 @@ def detect_swings_hierarchical(df: pd.DataFrame, window_minor: int = 2, window_m
         major_low = lo == df["low"].iloc[i - window_major : i + window_major + 1].min()
 
         local_range = float((df["high"].iloc[i - window_minor : i + window_minor + 1].max() - df["low"].iloc[i - window_minor : i + window_minor + 1].min()) + 1e-8)
-        if minor_high:
-            swings.append(SwingPoint(i, float(hi), "high", strength=abs(float(df["close"].iloc[i] - df["open"].iloc[i])) / local_range, level="major" if major_high else "minor"))
-        if minor_low:
-            swings.append(SwingPoint(i, float(lo), "low", strength=abs(float(df["close"].iloc[i] - df["open"].iloc[i])) / local_range, level="major" if major_low else "minor"))
+        body_ratio = abs(float(df["close"].iloc[i] - df["open"].iloc[i])) / local_range
+
+        if minor_high and body_ratio > 0.15:
+            swings.append(SwingPoint(i, float(hi), "high", strength=body_ratio, level="major" if major_high else "minor"))
+        if minor_low and body_ratio > 0.15:
+            swings.append(SwingPoint(i, float(lo), "low", strength=body_ratio, level="major" if major_low else "minor"))
     return swings
 
 
@@ -46,32 +48,45 @@ def structure_labels_from_swings(df: pd.DataFrame, swings: List[SwingPoint]) -> 
     lows = [s for s in swings if s.kind == "low" and s.level == "major"]
 
     for i in range(1, len(highs)):
-        label = "HH" if highs[i].price > highs[i - 1].price else "LH"
-        out.at[highs[i].idx, "structure_label"] = label
+        out.at[highs[i].idx, "structure_label"] = "HH" if highs[i].price > highs[i - 1].price else "LH"
     for i in range(1, len(lows)):
         label = "HL" if lows[i].price > lows[i - 1].price else "LL"
         prev = out.at[lows[i].idx, "structure_label"]
         out.at[lows[i].idx, "structure_label"] = (prev + "/" + label).strip("/")
 
-    # BOS/CHoCH basés sur rupture de derniers swings majeurs
-    last_high = None
-    last_low = None
+    displacement_q = (out["high"] - out["low"]).quantile(0.7)
+
+    major_high_levels = []
+    major_low_levels = []
     trend = "RANGE"
+
     for i in range(len(out)):
         high_hit = [s for s in highs if s.idx == i]
         low_hit = [s for s in lows if s.idx == i]
-        if high_hit:
-            last_high = high_hit[-1].price
-        if low_hit:
-            last_low = low_hit[-1].price
+        for h in high_hit:
+            major_high_levels.append(h.price)
+        for l in low_hit:
+            major_low_levels.append(l.price)
 
-        c = out["close"].iloc[i]
-        if last_high is not None and c > last_high:
+        if not major_high_levels or not major_low_levels:
+            out.at[i, "trend_context"] = "RANGE"
+            continue
+
+        last_high = major_high_levels[-1]
+        last_low = major_low_levels[-1]
+        close_i = out["close"].iloc[i]
+        prev_close = out["close"].iloc[i - 1] if i > 0 else close_i
+        disp = out["high"].iloc[i] - out["low"].iloc[i]
+
+        bull_break = close_i > last_high and prev_close > last_high and disp >= displacement_q
+        bear_break = close_i < last_low and prev_close < last_low and disp >= displacement_q
+
+        if bull_break:
             out.at[i, "recent_bos_flag"] = 1
             if trend == "DOWN":
                 out.at[i, "recent_choch_flag"] = 1
             trend = "UP"
-        elif last_low is not None and c < last_low:
+        elif bear_break:
             out.at[i, "recent_bos_flag"] = 1
             if trend == "UP":
                 out.at[i, "recent_choch_flag"] = 1
