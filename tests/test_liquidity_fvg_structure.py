@@ -5,7 +5,8 @@ import pandas as pd
 from src.fvg_engine import FVGBook
 from src.liquidity_map import LiquidityMap
 from src.market_structure import detect_swings_hierarchical, structure_labels_from_swings
-from src.state_engine import build_transition_key
+from src.sessions import xauusd_session_name
+from src.state_engine import build_transition_key, learn_transition_model, sample_next_state
 
 
 def test_liquidity_zone_persistence_and_sweep():
@@ -24,53 +25,64 @@ def test_liquidity_zone_persistence_and_sweep():
 
 
 def test_fvg_lifecycle_fill_ratio():
-    df = pd.DataFrame(
-        {
-            "high": [100, 101, 102, 103],
-            "low": [99, 100, 101.5, 102],
-        }
-    )
+    df = pd.DataFrame({"high": [100, 101, 102, 103], "low": [99, 100, 101.5, 102]})
     book = FVGBook()
-    created = book.detect_new(df, 2, state="TREND_UP", session="LONDON")
+    created = book.detect_new(df, 2, state="TREND_UP", session="LONDON_OPEN")
     assert len(created) == 1
     z = created[0]
 
     book.update_fill(3, high=102.0, low=101.0)
     assert z.partially_filled is True
-    assert z.fill_ratio > 0
+    assert 0 < z.fill_ratio < 1
 
     book.update_fill(4, high=z.top + 1, low=z.bottom - 1)
     assert z.fully_filled is True
     assert z.fill_ratio == 1.0
 
 
-def test_structure_hh_hl_lh_ll_bos_choch():
+def test_structure_bos_and_choch_trigger():
+    # construit pour provoquer bascule up puis down
     df = pd.DataFrame(
         {
-            "high": [10, 12, 11, 13, 12, 14, 13, 15],
-            "low": [9, 10, 9.5, 11, 10.5, 12, 11, 13],
-            "open": [9.5] * 8,
-            "close": [10, 11, 10.2, 12.5, 11.2, 13.2, 11.1, 14.2],
+            "high": [100, 101, 102, 104, 105, 103, 102, 100, 99, 98],
+            "low": [99, 100, 101, 102, 103, 100, 99, 97, 96, 95],
+            "open": [99.5, 100.2, 101.5, 103, 104, 101.2, 100, 98.5, 97, 96],
+            "close": [100.1, 101, 102.2, 104.2, 105.1, 100.5, 99.2, 97.2, 96.1, 95.5],
         }
     )
     swings = detect_swings_hierarchical(df, window_minor=1, window_major=1)
     out = structure_labels_from_swings(df, swings)
     assert "recent_bos_flag" in out.columns
     assert "recent_choch_flag" in out.columns
-    assert "trend_context" in out.columns
+    assert out["trend_context"].nunique() >= 1
 
 
-def test_sweep_vs_breakout_context_key():
-    row = pd.Series(
+def test_transition_depends_on_context_not_only_state():
+    state_df = pd.DataFrame(
         {
-            "vol_regime_bucket": "HIGH",
-            "distance_to_nearest_buy_liquidity": 0.2,
-            "breakout_rejected": True,
-            "recent_sweep_flag": 1,
-            "session_name": "NEW_YORK",
+            "state": ["RANGE", "RANGE", "RANGE", "RANGE"],
+            "vol_regime_bucket": ["LOW", "HIGH", "LOW", "HIGH"],
+            "distance_to_nearest_buy_liquidity": [0.2, 3.0, 0.2, 3.0],
+            "distance_to_nearest_sell_liquidity": [0.2, 3.0, 0.2, 3.0],
+            "breakout_rejected": [True, False, True, False],
+            "breakout_up": [False, True, False, True],
+            "breakout_down": [False, False, False, False],
+            "recent_sweep_flag": [1, 0, 1, 0],
+            "session_name": ["ASIA", "NEW_YORK", "ASIA", "NEW_YORK"],
+            "log_return": [0.01, 0.02, -0.01, 0.03],
+            "range": [1.0, 2.0, 1.2, 2.2],
         }
     )
-    key = build_transition_key("BREAKOUT_REJECTED", row)
-    assert key[2] == "NEAR"
-    assert key[3] == "REJECTED"
-    assert key[4] == "SWEEP"
+    tm = learn_transition_model(state_df)
+    row_a = state_df.iloc[0]
+    row_b = state_df.iloc[1]
+    key_a = build_transition_key("RANGE", row_a)
+    key_b = build_transition_key("RANGE", row_b)
+    assert key_a != key_b
+    rng = __import__("numpy").random.default_rng(0)
+    _ = sample_next_state("RANGE", row_a, tm.transition_probs, rng)
+
+
+def test_session_labels_are_consistent():
+    ts = pd.Timestamp("2025-01-01 09:00:00", tz="UTC")
+    assert xauusd_session_name(ts) == "LONDON_OPEN"

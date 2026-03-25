@@ -245,7 +245,7 @@ def scan_data_sources(root_path: str | Path) -> IngestionReport:
     return report
 
 
-def merge_compatible_datasets(datasets: List[NormalizedDataset], report: IngestionReport | None = None, mode: str = "timeframe") -> pd.DataFrame:
+def merge_compatible_datasets(datasets: List[NormalizedDataset], report: IngestionReport | None = None, mode: str = "balanced") -> pd.DataFrame:
     if not datasets:
         return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
@@ -253,11 +253,21 @@ def merge_compatible_datasets(datasets: List[NormalizedDataset], report: Ingesti
     for d in datasets:
         grouped.setdefault(d.timeframe_seconds, []).append(d)
 
-    target_tf = max(grouped, key=lambda k: len(grouped[k]))
+    def score(tf: int) -> float:
+        ds = grouped[tf]
+        rows = sum(len(x.dataframe) for x in ds)
+        if mode == "dataset_count":
+            return float(len(ds))
+        if mode == "row_count":
+            return float(rows)
+        # balanced: nombre de datasets + volume d'information
+        return float(len(ds) + rows / 10_000.0)
+
+    target_tf = max(grouped, key=score)
     selected = grouped[target_tf]
 
     if report:
-        report.log(f"fusion: timeframe cible {target_tf}s avec {len(selected)} datasets")
+        report.log(f"fusion mode={mode}: timeframe cible {target_tf}s avec {len(selected)} datasets")
         for tf, ds_list in grouped.items():
             if tf != target_tf:
                 report.log(f"dataset ignoré pour fusion (timeframe incompatible {tf}s): {len(ds_list)}")

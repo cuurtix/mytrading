@@ -54,7 +54,7 @@ class SyntheticMarketSimulator:
         current_state = str(self.learned.feature_df["state"].iloc[-1]) if "state" in self.learned.feature_df.columns else "RANGE"
 
         # Build persistent maps from recent learned history (structure-based)
-        base_feat = add_market_features(hist.tail(300).copy())
+        base_feat = self.learned.feature_df.tail(300).copy() if set(["swing_high","swing_low"]).issubset(self.learned.feature_df.columns) else add_market_features(hist.tail(300).copy())
         lmap = LiquidityMap()
         fvg = FVGBook()
         roll_h = base_feat["high"].rolling(30, min_periods=5).max()

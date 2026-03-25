@@ -74,3 +74,5 @@ FOMO est implémenté comme amplification contextuelle bornée (breakout/expansi
 
 ## Session de référence
 Sessions XAUUSD calculées en timezone UTC explicite.
+
+- Heuristiques restantes explicitement assumées: coefficients de saturation FOMO et bornes de bucket, documentés comme compromis interprétables.

@@ -93,6 +93,8 @@ La logique de session est explicitement référencée en timezone **UTC** (ASIA,
 - Les transitions sont conditionnelles par buckets (interprétables), pas modèle profond.
 - Qualité dépend de la qualité/couverture des données source XAUUSD.
 
+- Heuristiques restantes explicitement assumées: coefficients de saturation FOMO et bornes de bucket, documentés comme compromis interprétables.
+
 ## Lancer
 
 ```bash

@@ -78,13 +78,15 @@ class FVGBook:
                 n += 1
         return n
 
-    def stats(self) -> Dict[str, float]:
+    def stats(self, total_bars: int | None = None) -> Dict[str, float]:
         if not self.zones:
-            return {"fvg_frequency": 0.0, "fvg_fill_complete_rate": 0.0, "fvg_partial_rate": 0.0, "fvg_age_to_fill_mean": 0.0}
+            return {"fvg_count": 0.0, "fvg_frequency_rate": 0.0, "fvg_fill_complete_rate": 0.0, "fvg_partial_rate": 0.0, "fvg_age_to_fill_mean": 0.0}
         filled = [z for z in self.zones if z.fully_filled]
         partial = [z for z in self.zones if z.partially_filled]
+        bars = max(int(total_bars or len(self.zones)), 1)
         return {
-            "fvg_frequency": float(len(self.zones)),
+            "fvg_count": float(len(self.zones)),
+            "fvg_frequency_rate": float(len(self.zones) / bars),
             "fvg_fill_complete_rate": float(len(filled) / len(self.zones)),
             "fvg_partial_rate": float(len(partial) / len(self.zones)),
             "fvg_age_to_fill_mean": float(np.mean([z.age for z in filled]) if filled else 0.0),

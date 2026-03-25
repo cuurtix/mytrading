@@ -150,4 +150,4 @@ def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
         "wick_lower_mean": float(states["wick_lower"].mean()),
     }
 
-    return LearnedBehavior(tm, session_profiles, sweep_stats, fvg.stats(), volatility_stats, cond_returns, cond_ranges, cond_wicks, states)
+    return LearnedBehavior(tm, session_profiles, sweep_stats, fvg.stats(total_bars=len(states)), volatility_stats, cond_returns, cond_ranges, cond_wicks, states)

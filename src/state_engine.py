@@ -62,7 +62,7 @@ def infer_market_states(features_df: pd.DataFrame) -> pd.DataFrame:
             state = "BREAKOUT_REJECTED"
         elif row.get("breakout_up", False) or row.get("breakout_down", False):
             state = "BREAKOUT_ACCEPTED"
-        elif row.get("fvg_context", 0) == 1 and row.get("distance_to_nearest_open_fvg", np.nan) < row["range"] * 1.5:
+        elif row.get("fvg_context", 0) == 1 and row.get("distance_to_nearest_open_fvg", np.nan) < 1.25:
             state = "REBALANCING_TO_FVG"
         elif row["trend_context"] == "TREND_UP" and row["expansion_score"] > 1.3:
             state = "EXPANSION_UP"
@@ -109,7 +109,7 @@ def learn_transition_model(state_df: pd.DataFrame) -> TransitionModel:
     rng_stats: Dict[Tuple[str, str, str], Dict[str, float]] = {}
     for state in MARKET_STATES:
         for vol_bucket in ["LOW", "NORMAL", "HIGH", "UNK"]:
-            for session in ["ASIA", "LONDON", "NEW_YORK", "UNK"]:
+            for session in ["ASIA", "LONDON_OPEN", "NEW_YORK", "LATE_SESSION", "UNK"]:
                 sub = state_df[(state_df["state"] == state) & (state_df["vol_regime_bucket"] == vol_bucket) & (state_df["session_name"] == session)]
                 key = (state, vol_bucket, session)
                 if sub.empty:
