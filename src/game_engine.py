@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List
+import logging
 
 import numpy as np
 import pandas as pd
@@ -36,6 +37,7 @@ class TradingGameEngine:
     maintenance_margin_ratio: float = 0.5
 
     def __init__(self, bundle: CalibrationBundle, seed: int = 11, config: ModelConfig | None = None):
+        self.logger = logging.getLogger(__name__)
         self.bundle = bundle
         self.rng = np.random.default_rng(seed)
         self.config = config or ModelConfig()
@@ -54,14 +56,22 @@ class TradingGameEngine:
 
         self.lmap = LiquidityMap()
         self.fvg = FVGBook()
-        feat = bundle.learned.feature_df.tail(300).copy()
-        roll_h = feat["high"].rolling(30, min_periods=5).max()
-        roll_l = feat["low"].rolling(30, min_periods=5).min()
-        for i, r in feat.iterrows():
-            self.lmap.ingest_feature_row(i, r, roll_h.iloc[i], roll_l.iloc[i])
+        feat = bundle.learned.feature_df.tail(300).copy().reset_index(drop=True)
+        roll_h = feat["high"].rolling(30, min_periods=5).max().reset_index(drop=True)
+        roll_l = feat["low"].rolling(30, min_periods=5).min().reset_index(drop=True)
+        feat_boot = feat.copy()
+        feat_boot["rolling_high"] = roll_h
+        feat_boot["rolling_low"] = roll_l
+        init_len = len(feat_boot)
+        feat_boot = feat_boot.dropna(subset=["rolling_high", "rolling_low"]).reset_index(drop=True)
+        dropped = init_len - len(feat_boot)
+        self.logger.info("[GAME] bootstrap feature rows initial=%s aligned=%s dropped=%s", init_len, len(feat_boot), dropped)
+
+        for i, r in feat_boot.iterrows():
+            self.lmap.ingest_feature_row(i, r, float(r["rolling_high"]), float(r["rolling_low"]))
             self.lmap.detect_sweep(i, float(r["high"]), float(r["low"]), float(r["close"]))
             self.lmap.age_and_decay(i)
-            self.fvg.detect_new(feat, i, state=str(r.get("state", "RANGE")), session=str(r.get("session_name", "ASIA")))
+            self.fvg.detect_new(feat_boot, i, state=str(r.get("state", "RANGE")), session=str(r.get("session_name", "ASIA")))
             self.fvg.update_fill(i, float(r["high"]), float(r["low"]))
 
     def _push_event(self, msg: str) -> None:

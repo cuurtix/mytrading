@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, Tuple
+import logging
 
 import numpy as np
 import pandas as pd
@@ -73,52 +74,66 @@ def _continuation_rate(series: pd.Series, horizon: int = 3) -> float:
 
 
 def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
+    logger = logging.getLogger(__name__)
     feat = add_market_features(df)
 
     # Strictement incrémental: query avant update (pas d'info future)
     lmap = LiquidityMap()
     fvg = FVGBook()
 
-    dist_buy, dist_sell, liq_strength = [], [], []
-    sweep_flag, sweep_side, sweep_strength = [], [], []
-    d_to_fvg, open_fvg_count, fvg_context = [], [], []
+    feat = feat.reset_index(drop=True)
+    rolling_high = feat["high"].rolling(30, min_periods=5).max().reset_index(drop=True)
+    rolling_low = feat["low"].rolling(30, min_periods=5).min().reset_index(drop=True)
+    work = feat.copy()
+    work["rolling_high"] = rolling_high
+    work["rolling_low"] = rolling_low
+    initial_len = len(work)
+    work_valid = work.dropna(subset=["rolling_high", "rolling_low"])
+    dropped_len = initial_len - len(work_valid)
+    logger.info("[LEARN] feature rows initial=%s aligned=%s dropped=%s", initial_len, len(work_valid), dropped_len)
 
-    rolling_high = feat["high"].rolling(30, min_periods=5).max()
-    rolling_low = feat["low"].rolling(30, min_periods=5).min()
+    liq_by_idx: Dict[int, float] = {}
+    dist_buy_by_idx: Dict[int, float] = {}
+    dist_sell_by_idx: Dict[int, float] = {}
+    sweep_flag_by_idx: Dict[int, int] = {}
+    sweep_side_by_idx: Dict[int, int] = {}
+    sweep_strength_by_idx: Dict[int, float] = {}
+    d_to_fvg_by_idx: Dict[int, float] = {}
+    open_fvg_by_idx: Dict[int, int] = {}
+    fvg_ctx_by_idx: Dict[int, int] = {}
 
-    for i, row in feat.iterrows():
-        local_scale = float(feat["range"].iloc[max(0, i - 30) : i + 1].mean() or 1.0)
+    for idx, row in work_valid.iterrows():
+        local_scale = float(feat["range"].iloc[max(0, idx - 30) : idx + 1].mean() or 1.0)
 
         liq = lmap.nearest_distances(float(row["close"]), local_scale=local_scale)
-        sw = lmap.detect_sweep(i, float(row["high"]), float(row["low"]), float(row["close"]))
-
-        dist_buy.append(liq["distance_to_nearest_buy_liquidity"])
-        dist_sell.append(liq["distance_to_nearest_sell_liquidity"])
-        liq_strength.append(liq["nearest_liquidity_strength"])
-        sweep_flag.append(sw["recent_sweep_flag"])
-        sweep_side.append(sw["recent_sweep_side"])
-        sweep_strength.append(sw["recent_sweep_strength"])
+        sw = lmap.detect_sweep(idx, float(row["high"]), float(row["low"]), float(row["close"]))
 
         d = fvg.nearest_open_distance(float(row["close"]))
-        d_to_fvg.append(d / max(local_scale, 1e-8) if not np.isnan(d) else np.nan)
-        open_fvg_count.append(fvg.open_count_nearby(float(row["close"]), threshold=local_scale * 1.5))
-        fvg_context.append(int(not np.isnan(d)))
+        dist_buy_by_idx[idx] = liq["distance_to_nearest_buy_liquidity"]
+        dist_sell_by_idx[idx] = liq["distance_to_nearest_sell_liquidity"]
+        liq_by_idx[idx] = liq["nearest_liquidity_strength"]
+        sweep_flag_by_idx[idx] = int(sw["recent_sweep_flag"])
+        sweep_side_by_idx[idx] = int(sw["recent_sweep_side"])
+        sweep_strength_by_idx[idx] = float(sw["recent_sweep_strength"])
+        d_to_fvg_by_idx[idx] = float(d / max(local_scale, 1e-8)) if not np.isnan(d) else np.nan
+        open_fvg_by_idx[idx] = int(fvg.open_count_nearby(float(row["close"]), threshold=local_scale * 1.5))
+        fvg_ctx_by_idx[idx] = int(not np.isnan(d))
 
         # Update maps only after extracting features at t
-        lmap.ingest_feature_row(i, row, rolling_high.iloc[i], rolling_low.iloc[i])
-        lmap.age_and_decay(i)
-        fvg.detect_new(feat, i, state=row.get("trend_context", ""), session=row.get("session_name", ""))
-        fvg.update_fill(i, float(row["high"]), float(row["low"]))
+        lmap.ingest_feature_row(idx, row, float(row["rolling_high"]), float(row["rolling_low"]))
+        lmap.age_and_decay(idx)
+        fvg.detect_new(work, idx, state=row.get("trend_context", ""), session=row.get("session_name", ""))
+        fvg.update_fill(idx, float(row["high"]), float(row["low"]))
 
-    feat["distance_to_nearest_buy_liquidity"] = pd.Series(dist_buy).fillna(3.0)
-    feat["distance_to_nearest_sell_liquidity"] = pd.Series(dist_sell).fillna(3.0)
-    feat["nearest_liquidity_strength"] = liq_strength
-    feat["recent_sweep_flag"] = sweep_flag
-    feat["recent_sweep_side"] = sweep_side
-    feat["recent_sweep_strength"] = sweep_strength
-    feat["distance_to_nearest_open_fvg"] = pd.Series(d_to_fvg).fillna(3.0)
-    feat["open_fvg_count_nearby"] = open_fvg_count
-    feat["fvg_context"] = fvg_context
+    feat["distance_to_nearest_buy_liquidity"] = pd.Series(dist_buy_by_idx).reindex(feat.index).fillna(3.0)
+    feat["distance_to_nearest_sell_liquidity"] = pd.Series(dist_sell_by_idx).reindex(feat.index).fillna(3.0)
+    feat["nearest_liquidity_strength"] = pd.Series(liq_by_idx).reindex(feat.index).fillna(0.0)
+    feat["recent_sweep_flag"] = pd.Series(sweep_flag_by_idx).reindex(feat.index).fillna(0).astype(int)
+    feat["recent_sweep_side"] = pd.Series(sweep_side_by_idx).reindex(feat.index).fillna(0).astype(int)
+    feat["recent_sweep_strength"] = pd.Series(sweep_strength_by_idx).reindex(feat.index).fillna(0.0)
+    feat["distance_to_nearest_open_fvg"] = pd.Series(d_to_fvg_by_idx).reindex(feat.index).fillna(3.0)
+    feat["open_fvg_count_nearby"] = pd.Series(open_fvg_by_idx).reindex(feat.index).fillna(0).astype(int)
+    feat["fvg_context"] = pd.Series(fvg_ctx_by_idx).reindex(feat.index).fillna(0).astype(int)
 
     states = infer_market_states(feat)
     tm = learn_transition_model(states)
