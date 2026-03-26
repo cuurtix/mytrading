@@ -29,6 +29,34 @@ COLUMN_ALIASES = {
     "volume": ["volume", "vol", "v"],
 }
 VERBOSE_INGESTION = True
+TIMEFRAME_ALIASES = {
+    "1m": 60,
+    "m1": 60,
+    "1min": 60,
+    "1minute": 60,
+    "5m": 300,
+    "m5": 300,
+    "5min": 300,
+    "15m": 900,
+    "m15": 900,
+    "15min": 900,
+    "1h": 3600,
+    "h1": 3600,
+    "60min": 3600,
+    "4h": 14400,
+    "h4": 14400,
+    "1d": 86400,
+    "d1": 86400,
+    "daily": 86400,
+}
+SYMBOL_ALIASES = {
+    "XAUTUSDT": "XAUUSD",
+    "XAUUSDT": "XAUUSD",
+    "XAUUSD": "XAUUSD",
+    "BTCUSDT": "BTCUSD",
+    "BTCUSD": "BTCUSD",
+    "EURUSD": "EURUSD",
+}
 
 
 @dataclass(frozen=True)
@@ -160,13 +188,69 @@ def _parse_timestamp(series: pd.Series) -> Tuple[pd.Series, str]:
     return pd.to_datetime(series, utc=True, errors="coerce"), "text_datetime"
 
 
+def detect_symbol(text: str) -> str:
+    token = "".join(ch for ch in str(text).upper() if ch.isalnum())
+    for alias, canonical in SYMBOL_ALIASES.items():
+        if alias in token:
+            return canonical
+    return "UNKNOWN"
+
+
+def _label_from_seconds(seconds: int) -> str:
+    mapping = {60: "1m", 180: "3m", 300: "5m", 900: "15m", 1800: "30m", 3600: "1h", 14400: "4h", 86400: "1d"}
+    return mapping.get(seconds, f"{seconds}s")
+
+
+def detect_timeframe_from_text(text: str) -> tuple[int, str] | None:
+    import re
+
+    lower = str(text).lower().replace(" ", "")
+    for alias, sec in TIMEFRAME_ALIASES.items():
+        pattern = rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
+        if re.search(pattern, lower):
+            return sec, _label_from_seconds(sec)
+    return None
+
+
+def trades_to_ohlc(raw: pd.DataFrame, timeframe_seconds: int = 60) -> pd.DataFrame:
+    cols = {str(c).strip().lower(): c for c in raw.columns}
+    ts_col = next((cols[c] for c in cols if c in {"timestamp", "time", "datetime", "date"}), None)
+    px_col = next((cols[c] for c in cols if c in {"price", "last", "close"}), None)
+    size_col = next((cols[c] for c in cols if c in {"size", "size(base)", "basevolume", "quantity", "qty", "volume"}), None)
+    if ts_col is None or px_col is None:
+        raise ValueError("trade_columns_missing")
+    out = pd.DataFrame()
+    out["timestamp"], _ = _parse_timestamp(raw[ts_col])
+    out["price"] = pd.to_numeric(raw[px_col], errors="coerce")
+    if size_col is not None:
+        out["size"] = pd.to_numeric(raw[size_col], errors="coerce").fillna(0.0)
+    else:
+        out["size"] = 0.0
+    out = out.dropna(subset=["timestamp", "price"]).sort_values("timestamp").reset_index(drop=True)
+    if out.empty:
+        raise ValueError("trade_rows_empty")
+    bucket = out["timestamp"].dt.floor(f"{max(1, int(timeframe_seconds))}s")
+    agg = (
+        out.assign(bucket=bucket)
+        .groupby("bucket", as_index=False)
+        .agg(
+            open=("price", "first"),
+            high=("price", "max"),
+            low=("price", "min"),
+            close=("price", "last"),
+            volume=("size", "sum"),
+        )
+        .rename(columns={"bucket": "timestamp"})
+    )
+    return agg
+
+
 def detect_timeframe_seconds(timestamps: pd.Series) -> Tuple[int, str]:
     diffs = timestamps.sort_values().diff().dropna().dt.total_seconds()
     if diffs.empty:
         return 60, "1m"
     mode_sec = int(diffs.round().mode().iloc[0])
-    mapping = {60: "1m", 180: "3m", 300: "5m", 900: "15m", 1800: "30m", 3600: "1h", 14400: "4h", 86400: "1d"}
-    return mode_sec, mapping.get(mode_sec, f"{mode_sec}s")
+    return mode_sec, _label_from_seconds(mode_sec)
 
 
 def sanitize_ohlc(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
@@ -342,18 +426,28 @@ def read_zip_datasets(zip_path: str | Path, cfg: IngestionConfig | None = None) 
         raw_dfs = read_zip_file(zip_path)
         for i, raw in enumerate(raw_dfs):
             rows_raw = len(raw)
-            clean = normalize_ohlc(raw)
+            member_name = f"{zip_path}::csv_{i}"
+            tf_hint = detect_timeframe_from_text(member_name)
+            try:
+                clean = normalize_ohlc(raw)
+            except Exception:
+                hint_seconds = tf_hint[0] if tf_hint else 60
+                clean = trades_to_ohlc(raw, timeframe_seconds=hint_seconds)
             if len(clean) > cfg.max_rows_per_dataset:
                 clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
             if len(clean) < cfg.min_rows_per_dataset:
                 log_ingestion(debug, "warning", f"{zip_path}::csv_{i}", "dataset_too_small", rows_raw=rows_raw, rows_clean=len(clean))
                 continue
-            tf = infer_timeframe(clean)
-            tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+            if tf_hint is not None:
+                tf_seconds, tf = tf_hint
+            else:
+                tf = infer_timeframe(clean)
+                tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+            symbol = detect_symbol(str(zip_path))
             report.datasets.append(
                 NormalizedDataset(str(zip_path), "zip_csv", f"csv_{i}", tf_seconds, tf, {}, clean.rename(columns={"timestamp": "datetime"}))
             )
-            debug["retained_files"].append({"file": f"{zip_path}::csv_{i}", "timeframe": tf, "rows": len(clean)})
+            debug["retained_files"].append({"file": f"{zip_path}::csv_{i}", "timeframe": tf, "rows": len(clean), "symbol": symbol})
             log_ingestion(debug, "info", f"{zip_path}::csv_{i}", "normalized", rows_raw=rows_raw, rows_clean=len(clean))
     except Exception as e:
         log_ingestion(debug, "error", zip_path, "zip_read_failed", error=str(e))
@@ -418,24 +512,36 @@ def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None)
 
                 for member_name, raw in raw_members:
                     rows_raw = len(raw)
+                    source_key = f"{path}::{member_name}"
+                    tf_hint = detect_timeframe_from_text(source_key)
+                    symbol = detect_symbol(source_key)
                     try:
                         clean = normalize_ohlc(raw)
                         rows_clean = len(clean)
-                        log_ingestion(debug, "info", f"{path}::{member_name}", "normalized", rows_raw=rows_raw, rows_clean=rows_clean)
+                        log_ingestion(debug, "info", source_key, "normalized", rows_raw=rows_raw, rows_clean=rows_clean, symbol=symbol)
                     except Exception as e:
-                        log_ingestion(debug, "error", f"{path}::{member_name}", "normalize_failed", rows_raw=rows_raw, error=str(e))
-                        continue
+                        try:
+                            hint_seconds = tf_hint[0] if tf_hint else 60
+                            clean = trades_to_ohlc(raw, timeframe_seconds=hint_seconds)
+                            rows_clean = len(clean)
+                            log_ingestion(debug, "info", source_key, "trades_aggregated_to_ohlc", rows_raw=rows_raw, rows_clean=rows_clean, symbol=symbol)
+                        except Exception:
+                            log_ingestion(debug, "error", source_key, "normalize_failed", rows_raw=rows_raw, error=str(e), symbol=symbol)
+                            continue
                     if len(clean) < cfg.min_rows_per_dataset:
-                        log_ingestion(debug, "warning", f"{path}::{member_name}", "dataset_too_small", rows_clean=len(clean))
+                        log_ingestion(debug, "warning", source_key, "dataset_too_small", rows_clean=len(clean), symbol=symbol)
                         continue
                     if len(clean) > cfg.max_rows_per_dataset:
                         clean = clean.tail(cfg.max_rows_per_dataset).reset_index(drop=True)
-                    try:
-                        tf = infer_timeframe(clean)
-                    except Exception as e:
-                        log_ingestion(debug, "warning", f"{path}::{member_name}", "timeframe_inference_failed", error=str(e))
-                        continue
-                    tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
+                    if tf_hint is not None:
+                        tf_seconds, tf = tf_hint
+                    else:
+                        try:
+                            tf = infer_timeframe(clean)
+                        except Exception as e:
+                            log_ingestion(debug, "warning", source_key, "timeframe_inference_failed", error=str(e), symbol=symbol)
+                            continue
+                        tf_seconds, _ = detect_timeframe_seconds(clean["timestamp"])
                     segs, seg_stats = split_by_continuity(clean.rename(columns={"timestamp": "datetime"}), tf_seconds)
                     for seg_i, seg in enumerate(segs):
                         if len(seg) < cfg.min_rows_per_dataset:
@@ -443,7 +549,7 @@ def scan_data_sources(root_path: str | Path, cfg: IngestionConfig | None = None)
                         ds_name = f"{path}::{member_name}::seg{seg_i}"
                         ds_type = "csv" if file.endswith(".csv") else ("excel" if file.endswith(".xlsx") or file.endswith(".xls") else "zip_mixed")
                         datasets.append(NormalizedDataset(str(ds_name), ds_type, None, tf_seconds, tf, {}, seg))
-                        debug["retained_files"].append({"file": str(ds_name), "timeframe": tf, "rows": len(seg), "gaps_detected": seg_stats["gaps_detected"]})
+                        debug["retained_files"].append({"file": str(ds_name), "timeframe": tf, "rows": len(seg), "gaps_detected": seg_stats["gaps_detected"], "symbol": symbol})
             except Exception as e:
                 log_ingestion(debug, "error", path, "read_failed", error=str(e))
 
