@@ -42,7 +42,8 @@ server_state: Dict[str, Any] = {
 
 engine: TradingGameEngine | None = None
 cached_bundle: CalibrationBundle | None = None
-INGEST_CFG = IngestionConfig(max_files=96, max_total_rows=300_000, max_rows_per_dataset=80_000, selection_strategy="balanced")
+# Increase max_files to avoid prematurely stopping ingestion when a single ZIP contains many shards.
+INGEST_CFG = IngestionConfig(max_files=4096, max_total_rows=300_000, max_rows_per_dataset=80_000, selection_strategy="balanced")
 
 
 def _count_supported_files(root: Path) -> int:
