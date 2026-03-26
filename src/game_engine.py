@@ -69,9 +69,16 @@ class PatternEngine:
 
         base_signal = float(self.pattern_signals[self.ptr])
         self.ptr += 1
-        liq_bias = float(context.get("liquidity_bias", 0.0))
-        fvg_bias = float(context.get("fvg_bias", 0.0))
-        sweep_bias = float(context.get("sweep_bias", 0.0))
+        # CORRECTED: sanitize NaN/inf values from runtime context before directional scoring.
+        clean_context: Dict[str, float] = {}
+        for k, v in context.items():
+            fv = float(v) if pd.notna(v) else 0.0
+            if not np.isfinite(fv):
+                fv = 0.0
+            clean_context[k] = float(np.clip(fv, -1000.0, 1000.0))
+        liq_bias = float(clean_context.get("liquidity_bias", 0.0))
+        fvg_bias = float(clean_context.get("fvg_bias", 0.0))
+        sweep_bias = float(clean_context.get("sweep_bias", 0.0))
 
         raw = base_signal + (0.9 * liq_bias) + (0.6 * fvg_bias) + (0.8 * sweep_bias)
         direction = float(np.sign(raw) if raw != 0 else 1.0)
@@ -106,6 +113,7 @@ class TradingGameEngine:
         self.reference_df = bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
         self.history = self.bundle.merged_df[["datetime", "open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
         self.price = float(self.history["close"].iloc[-1])
+        self._steps_since_history_trim = 0  # CORRECTED: avoid expensive per-step full dataframe concat.
         self.account = GameAccount()
         self.next_pos_id = 1
         self.phase_cycle = ["accumulation", "manipulation", "distribution"]
@@ -816,7 +824,12 @@ class TradingGameEngine:
         errs = validate_ohlc(row)
         if errs:
             self._push_event("MONITOR_OHLC: " + ",".join(errs))
-        self.history = pd.concat([self.history, pd.DataFrame([row])], ignore_index=True).tail(2000).reset_index(drop=True)
+        # CORRECTED: append in-place and trim periodically (amortized), instead of per-step pd.concat().
+        self.history.loc[len(self.history)] = row
+        self._steps_since_history_trim += 1
+        if self._steps_since_history_trim >= 50 or len(self.history) > 2100:
+            self.history = self.history.tail(2000).reset_index(drop=True)
+            self._steps_since_history_trim = 0
         self.online.update(row, sweep_flag=int(bool(sweep["recent_sweep_flag"])))
         self.current_vol = float(max(1e-6, (0.9 * base_vol) + (0.1 * self.online.vol)))
         self.current_drift = float(np.clip((next_close - current_price) / max(current_price, 1e-6), -2.0, 2.0))

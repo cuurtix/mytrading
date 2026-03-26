@@ -131,15 +131,24 @@ def learn_behavior(df: pd.DataFrame) -> LearnedBehavior:
         fvg.detect_new(work, idx, state=row.get("trend_context", ""), session=row.get("session_name", ""))
         fvg.update_fill(idx, float(row["high"]), float(row["low"]))
 
-    feat["distance_to_nearest_buy_liquidity"] = pd.Series(dist_buy_by_idx).reindex(feat.index).fillna(3.0)
-    feat["distance_to_nearest_sell_liquidity"] = pd.Series(dist_sell_by_idx).reindex(feat.index).fillna(3.0)
-    feat["nearest_liquidity_strength"] = pd.Series(liq_by_idx).reindex(feat.index).fillna(0.0)
-    feat["recent_sweep_flag"] = pd.Series(sweep_flag_by_idx).reindex(feat.index).fillna(0).astype(int)
-    feat["recent_sweep_side"] = pd.Series(sweep_side_by_idx).reindex(feat.index).fillna(0).astype(int)
-    feat["recent_sweep_strength"] = pd.Series(sweep_strength_by_idx).reindex(feat.index).fillna(0.0)
-    feat["distance_to_nearest_open_fvg"] = pd.Series(d_to_fvg_by_idx).reindex(feat.index).fillna(3.0)
-    feat["open_fvg_count_nearby"] = pd.Series(open_fvg_by_idx).reindex(feat.index).fillna(0).astype(int)
-    feat["fvg_context"] = pd.Series(fvg_ctx_by_idx).reindex(feat.index).fillna(0).astype(int)
+    # CORRECTED: stabilize feature columns against NaN/inf propagation.
+    feat["distance_to_nearest_buy_liquidity"] = pd.Series(dist_buy_by_idx).reindex(feat.index).astype(float).fillna(3.0)
+    feat["distance_to_nearest_sell_liquidity"] = pd.Series(dist_sell_by_idx).reindex(feat.index).astype(float).fillna(3.0)
+    feat["nearest_liquidity_strength"] = pd.Series(liq_by_idx).reindex(feat.index).astype(float).fillna(0.0)
+    feat["recent_sweep_flag"] = pd.Series(sweep_flag_by_idx).reindex(feat.index).astype(float).fillna(0).astype(int)
+    feat["recent_sweep_side"] = pd.Series(sweep_side_by_idx).reindex(feat.index).astype(float).fillna(0).astype(int)
+    feat["recent_sweep_strength"] = pd.Series(sweep_strength_by_idx).reindex(feat.index).astype(float).fillna(0.0)
+    feat["distance_to_nearest_open_fvg"] = pd.Series(d_to_fvg_by_idx).reindex(feat.index).astype(float).fillna(3.0)
+    feat["open_fvg_count_nearby"] = pd.Series(open_fvg_by_idx).reindex(feat.index).astype(float).fillna(0).astype(int)
+    feat["fvg_context"] = pd.Series(fvg_ctx_by_idx).reindex(feat.index).astype(float).fillna(0).astype(int)
+    numeric_cols = [
+        "distance_to_nearest_buy_liquidity",
+        "distance_to_nearest_sell_liquidity",
+        "nearest_liquidity_strength",
+        "recent_sweep_strength",
+        "distance_to_nearest_open_fvg",
+    ]
+    feat[numeric_cols] = feat[numeric_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     states = infer_market_states(feat)
     tm = learn_transition_model(states)

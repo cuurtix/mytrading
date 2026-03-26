@@ -601,4 +601,13 @@ def merge_compatible_datasets(datasets: List[NormalizedDataset], report: Ingesti
             report.log(f"[LEARN] merged rows clipped to {max_total_rows}")
     if report:
         report.log(f"[LEARN] merged rows={len(merged)}")
+    # CORRECTED: explicit memory cleanup after merge for large local imports.
+    try:
+        import gc
+
+        for d in datasets:
+            d.dataframe = d.dataframe.iloc[0:0].copy()
+        gc.collect()
+    except Exception:
+        pass
     return merged.reset_index(drop=True)

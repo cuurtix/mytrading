@@ -246,15 +246,25 @@ async function step(){
   }
 }
 
+// CORRECTED: sequential scheduler to prevent request piling under slow network/server responses.
+function scheduleNextStep(){
+  if(!running) return;
+  step().finally(() => {
+    if(running){
+      timer = setTimeout(scheduleNextStep, 3000);
+    }
+  });
+}
+
 function startMarket(){
   if(running) return;
   running = true;
-  timer = setInterval(step, 3000);
+  scheduleNextStep();
 }
 
 function stopMarket(){
   running = false;
-  if(timer) clearInterval(timer);
+  if(timer) clearTimeout(timer);
 }
 
 document.getElementById('btnStep').onclick = step;

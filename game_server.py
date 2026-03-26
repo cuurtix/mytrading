@@ -9,6 +9,7 @@ from collections import Counter
 
 import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
+from functools import wraps
 
 from src.data_ingestion import IngestionConfig, IngestionReport, NormalizedDataset, scan_data_sources
 from src.data_learning import CalibrationBundle, learn_from_report
@@ -194,6 +195,19 @@ def _debug_payload() -> Dict[str, Any]:
         }
 
 
+def safe_api_call(func):
+    # CORRECTED: Always return JSON payload even when unexpected engine exceptions occur.
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            logger.exception("[API] unhandled error in %s", func.__name__)
+            return jsonify({"ok": False, "reason": "Internal Engine Error", "details": str(exc), "debug": _debug_payload()}), 200
+
+    return wrapper
+
+
 @app.get("/")
 def index():
     return send_from_directory(STATIC, "index.html")
@@ -211,6 +225,7 @@ def init_status():
 
 
 @app.post("/api/init")
+@safe_api_call
 def init_game():
     with state_lock:
         status = server_state["status"]
@@ -234,6 +249,7 @@ def init_game():
 
 
 @app.post("/api/step")
+@safe_api_call
 def step():
     try:
         e = _ensure_engine_ready()
@@ -247,6 +263,7 @@ def step():
 
 
 @app.post("/api/order")
+@safe_api_call
 def order():
     try:
         e = _ensure_engine_ready()
@@ -257,6 +274,7 @@ def order():
 
 
 @app.post("/api/close")
+@safe_api_call
 def close():
     try:
         e = _ensure_engine_ready()
@@ -268,6 +286,7 @@ def close():
 
 
 @app.post("/api/deposit")
+@safe_api_call
 def deposit():
     try:
         e = _ensure_engine_ready()
@@ -278,6 +297,7 @@ def deposit():
 
 
 @app.post("/api/withdraw")
+@safe_api_call
 def withdraw():
     try:
         e = _ensure_engine_ready()
@@ -288,6 +308,7 @@ def withdraw():
 
 
 @app.post("/api/reset")
+@safe_api_call
 def reset():
     global engine
     with state_lock:
