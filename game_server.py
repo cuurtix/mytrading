@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -18,6 +19,7 @@ STATIC = ROOT / "web"
 DATA_ROOT = ROOT / "data"
 
 app = Flask(__name__, static_folder=str(STATIC), static_url_path="/static")
+logger = logging.getLogger(__name__)
 
 state_lock = threading.Lock()
 server_state: Dict[str, Any] = {
@@ -78,6 +80,7 @@ def _set_state(**kwargs: Any) -> None:
 
 def _initialize_runtime() -> None:
     global cached_bundle, engine
+    logger.info("[BOOT] background initialization started")
     start = time.perf_counter()
     _set_state(status="loading", phase="scan_data", error=None)
     files_detected = _count_supported_files(DATA_ROOT)
@@ -103,9 +106,20 @@ def _initialize_runtime() -> None:
     except Exception as exc:
         scan_ms = None
         learn_ms = None
-        bundle = _fallback_bundle()
-        used_fallback = True
-        _set_state(error=f"Échec chargement données: {exc}. Utilisation fallback synthétique.", fallback_reason=str(exc))
+        try:
+            bundle = _fallback_bundle()
+            used_fallback = True
+            _set_state(error=f"Échec chargement données: {exc}. Utilisation fallback synthétique.", fallback_reason=str(exc))
+        except Exception as fallback_exc:
+            _set_state(
+                status="failed",
+                phase="failed",
+                error=f"Échec initialisation runtime: {fallback_exc}",
+                fallback_reason=str(exc),
+                load_time_ms=int((time.perf_counter() - start) * 1000),
+            )
+            logger.exception("[BOOT] runtime initialization failed")
+            return
 
     with state_lock:
         cached_bundle = bundle
@@ -127,6 +141,17 @@ def _initialize_runtime() -> None:
                 "data_mode": "fallback" if used_fallback else "real",
             }
         )
+    logger.info(
+        "[BOOT] runtime state ready (mode=%s, fallback=%s, rows=%s)",
+        server_state.get("data_mode"),
+        server_state.get("fallback_used"),
+        server_state.get("rows_merged"),
+    )
+
+
+def _start_background_init() -> None:
+    logger.info("[BOOT] launching initialization thread")
+    threading.Thread(target=_initialize_runtime, daemon=True).start()
 
 
 def _ensure_engine_ready() -> TradingGameEngine:
@@ -273,7 +298,7 @@ def reset():
     return jsonify({"ok": True, "snapshot": engine.snapshot()})
 
 
-_initialize_runtime()
-
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    _start_background_init()
     app.run(host="127.0.0.1", port=8000, debug=False)
